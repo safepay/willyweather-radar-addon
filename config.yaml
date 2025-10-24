@@ -2,7 +2,7 @@ name: WillyWeather Radar
 version: "1.0.0"
 slug: willyweather_radar
 description: Fetch and serve WillyWeather radar imagery with blending support
-url: https://github.com/yourusername/willyweather-radar-addon
+url: https://github.com/safepay/willyweather-radar-addon
 arch:
   - armhf
   - armv7
