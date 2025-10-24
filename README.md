@@ -1,175 +1,49 @@
-# WillyWeather Radar Add-on for Home Assistant
+# WillyWeather Radar Add-on Repository
 
-This Home Assistant add-on fetches and serves Australian weather radar imagery from WillyWeather.com.au. It intelligently blends multiple regional radars based on your location and zoom level, or switches to the national radar when viewing larger areas.
+Home Assistant add-on repository for Australian weather radar from WillyWeather.
 
-## Features
+## Add-ons in this Repository
 
-- **Smart Radar Selection**: Automatically chooses between regional and national radar based on zoom level
-- **Multi-Radar Blending**: Combines multiple regional radars for seamless coverage
-- **Caching**: Reduces API calls and improves performance
-- **Ingress Support**: Secure access through Home Assistant's ingress system
-- **RESTful API**: Easy integration with custom cards and automations
+- **WillyWeather Radar** - Fetch and serve Australian weather radar imagery with intelligent multi-radar blending
 
 ## Installation
 
-### Method 1: Add as Repository (Recommended)
+Add this repository to your Home Assistant instance:
 
-1. Add this repository to your Home Assistant add-on store:
-   - Navigate to **Settings** → **Add-ons** → **Add-on Store**
-   - Click the three dots menu (⋮) in the top right
-   - Select **Repositories**
-   - Add: `https://github.com/yourusername/willyweather-radar-addon`
-   - Click **Add**
+1. Navigate to **Settings** → **Add-ons** → **Add-on Store**
+2. Click the **⋮** menu (three dots) in the top right
+3. Select **Repositories**
+4. Add this URL:
+   ```
+   https://github.com/yourusername/willyweather-radar-addon
+   ```
+5. Click **Add**
+6. Close and reopen the Add-on Store
+7. You should see "WillyWeather Radar" in the list
 
-2. Refresh the add-on store (you may need to close and reopen it)
+## Add-ons
 
-3. Find "WillyWeather Radar" in the add-on list
+### WillyWeather Radar
 
-4. Click on it and click **Install**
+Fetches and serves Australian weather radar imagery from WillyWeather.com.au with intelligent multi-radar blending.
 
-5. Once installed, go to the **Configuration** tab and add your WillyWeather API key
+**Features:**
+- Smart radar selection (regional vs national)
+- Multi-radar blending for seamless coverage
+- Built-in caching
+- Ingress support for secure access
+- RESTful API
 
-6. Start the add-on
+**Requirements:**
+- WillyWeather API key (free tier available)
 
-### Method 2: Manual Installation (Development)
-
-If you're developing or testing:
-
-1. Clone this repository
-2. Copy the entire directory to `/addons/willyweather-radar/` on your Home Assistant instance
-3. Restart the Supervisor
-4. The add-on will appear in your local add-ons list
-
-## Configuration
-
-```yaml
-api_key: "your_willyweather_api_key_here"
-cache_duration: 300  # Cache duration in seconds (default: 5 minutes)
-log_level: info      # Log level: debug, info, warning, error
-```
-
-### Getting a WillyWeather API Key
-
-1. Visit [WillyWeather Developer Portal](https://www.willyweather.com.au/info/api.html)
-2. Sign up for a free API key
-3. Copy your API key and paste it into the add-on configuration
-
-## API Endpoints
-
-Once installed, the add-on exposes the following API endpoints via ingress:
-
-### Get Radar Image
-
-```
-GET /api/radar?lat={latitude}&lng={longitude}&zoom={zoom}&timestamp={timestamp}
-```
-
-**Parameters:**
-- `lat` (required): Latitude (-90 to 90)
-- `lng` (required): Longitude (-180 to 180)
-- `zoom` (required): Map zoom level (5-15)
-- `timestamp` (optional): Specific timestamp (YYYY-MM-DD HH:MM:SS)
-
-**Returns:** PNG image
-
-### Get Providers
-
-```
-GET /api/providers?lat={latitude}&lng={longitude}&type={type}
-```
-
-**Parameters:**
-- `lat` (required): Latitude
-- `lng` (required): Longitude
-- `type` (optional): Map type (regional-radar or radar)
-
-**Returns:** JSON array of radar providers
-
-### Get Timestamps
-
-```
-GET /api/timestamps?lat={latitude}&lng={longitude}&type={type}
-```
-
-**Parameters:**
-- `lat` (required): Latitude
-- `lng` (required): Longitude
-- `type` (optional): Map type
-
-**Returns:** JSON array of available timestamps
-
-### Health Check
-
-```
-GET /api/health
-```
-
-**Returns:** `{"status": "ok"}`
-
-## How It Works
-
-### Radar Selection Logic
-
-The add-on uses intelligent logic to determine which radar data to serve:
-
-1. **Zoom Level Analysis**: Calculates the approximate viewing radius based on the zoom level
-2. **National vs Regional**:
-   - **Zoom > 1500km radius** (covering multiple states): Uses national radar
-   - **Zoom < 1500km radius**: Uses regional radars with blending
-
-### Multi-Radar Blending
-
-For regional radar views:
-
-1. Queries WillyWeather for nearby radar stations
-2. Calculates coverage overlap for each radar with the viewing area
-3. Downloads overlays from radars with significant coverage
-4. Blends images using weighted averaging based on coverage percentages
-5. Returns a seamless composite image
-
-This approach eliminates visible seams between radar coverage areas and provides the best available data for any location.
-
-## Usage with Custom Cards
-
-This add-on is designed to work with the companion custom card. Access the radar images through Home Assistant's ingress system:
-
-```javascript
-// In your custom card
-const addonUrl = '/api/hassio_ingress/{ingress_token}';
-const radarUrl = `${addonUrl}/api/radar?lat=${lat}&lng=${lng}&zoom=${zoom}`;
-```
-
-See the [WillyWeather Radar Card](https://github.com/yourusername/willyweather-radar-card) repository for the companion Lovelace card.
-
-## Troubleshooting
-
-### No Radar Data
-
-- Verify your API key is correct
-- Check that you're querying coordinates within Australia
-- Review logs: **Settings** → **Add-ons** → **WillyWeather Radar** → **Log**
-
-### Slow Performance
-
-- Increase `cache_duration` in configuration
-- Check your internet connection
-- Verify WillyWeather API is accessible
-
-### API Rate Limits
-
-- The free WillyWeather API has rate limits
-- Use caching to minimize API calls
-- Consider upgrading to a paid plan for higher limits
+See [willyweather-radar/README.md](willyweather-radar/README.md) for detailed documentation.
 
 ## Support
 
-For issues and feature requests, please use the [GitHub Issues](https://github.com/yourusername/willyweather-radar-addon/issues) page.
+- [Issues](https://github.com/yourusername/willyweather-radar-addon/issues)
+- [Home Assistant Community](https://community.home-assistant.io/)
 
 ## License
 
-MIT License - See LICENSE file for details
-
-## Credits
-
-- Weather data provided by [WillyWeather](https://www.willyweather.com.au/)
-- Developed for the Home Assistant community
+MIT License - see individual add-on directories for details
