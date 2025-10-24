@@ -18,7 +18,8 @@ import numpy as np
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
 )
 logger = logging.getLogger(__name__)
 
@@ -38,19 +39,31 @@ def load_config():
     """Load configuration from options.json."""
     global config
     try:
-        with open(CONFIG_PATH, 'r') as f:
-            config = json.load(f)
+        if os.path.exists(CONFIG_PATH):
+            with open(CONFIG_PATH, 'r') as f:
+                config = json.load(f)
+        else:
+            logger.warning(f"Config file not found at {CONFIG_PATH}, using defaults")
+            config = {
+                'api_key': os.environ.get('API_KEY', ''),
+                'cache_duration': 300,
+                'log_level': 'info'
+            }
         
         log_level = config.get('log_level', 'info').upper()
-        logger.setLevel(getattr(logging, log_level))
+        logger.setLevel(getattr(logging, log_level, logging.INFO))
         logger.info(f"Configuration loaded successfully")
+        logger.info(f"Log level set to: {log_level}")
         
         if not config.get('api_key'):
             logger.error("API key not configured!")
+            logger.error("Please configure your WillyWeather API key in the addon configuration")
             sys.exit(1)
+        else:
+            logger.info(f"API key configured: {config['api_key'][:8]}...")
             
     except Exception as e:
-        logger.error(f"Failed to load configuration: {e}")
+        logger.error(f"Failed to load configuration: {e}", exc_info=True)
         sys.exit(1)
 
 
@@ -62,6 +75,9 @@ class WillyWeatherAPI:
     def __init__(self, api_key: str):
         self.api_key = api_key
         self.session = requests.Session()
+        self.session.headers.update({
+            'User-Agent': 'HomeAssistant-WillyWeatherRadar/1.0'
+        })
     
     def get_map_providers(self, lat: float, lng: float, map_type: str, 
                          offset: int = -60, limit: int = 60) -> List[Dict]:
@@ -71,7 +87,7 @@ class WillyWeatherAPI:
         Args:
             lat: Latitude
             lng: Longitude
-            map_type: Type of map (regional-radar, radar, etc.)
+            map_type: Type of map (regional-radar or radar, etc.)
             offset: Minutes to start from (negative for past)
             limit: Minutes to end at
             
@@ -97,11 +113,17 @@ class WillyWeatherAPI:
         }
         
         try:
+            logger.debug(f"Requesting map providers: {map_type} at ({lat}, {lng})")
             response = self.session.get(url, headers=headers, timeout=10)
             response.raise_for_status()
-            return response.json()
+            data = response.json()
+            logger.debug(f"Received {len(data)} providers")
+            return data
         except requests.RequestException as e:
             logger.error(f"Failed to get map providers: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                logger.error(f"Response status: {e.response.status_code}")
+                logger.error(f"Response body: {e.response.text[:500]}")
             return []
     
     def download_overlay(self, overlay_path: str, overlay_name: str) -> Optional[bytes]:
@@ -118,8 +140,10 @@ class WillyWeatherAPI:
         url = f"https:{overlay_path}{overlay_name}"
         
         try:
+            logger.debug(f"Downloading overlay: {url}")
             response = self.session.get(url, timeout=10)
             response.raise_for_status()
+            logger.debug(f"Downloaded {len(response.content)} bytes")
             return response.content
         except requests.RequestException as e:
             logger.error(f"Failed to download overlay {url}: {e}")
@@ -226,7 +250,7 @@ class RadarBlender:
             return output.getvalue()
             
         except Exception as e:
-            logger.error(f"Failed to blend images: {e}")
+            logger.error(f"Failed to blend images: {e}", exc_info=True)
             return None
 
 
@@ -237,7 +261,11 @@ api = None
 @app.route('/api/health')
 def health_check():
     """Health check endpoint."""
-    return jsonify({'status': 'ok'})
+    return jsonify({
+        'status': 'ok',
+        'version': '1.0.1',
+        'api_configured': bool(config.get('api_key'))
+    })
 
 
 @app.route('/api/radar')
@@ -257,6 +285,14 @@ def get_radar():
         zoom = int(request.args.get('zoom', 10))
         timestamp = request.args.get('timestamp')
         
+        # Validate coordinates
+        if not (-90 <= lat <= 90):
+            return jsonify({'error': 'Invalid latitude'}), 400
+        if not (-180 <= lng <= 180):
+            return jsonify({'error': 'Invalid longitude'}), 400
+        if not (1 <= zoom <= 20):
+            return jsonify({'error': 'Invalid zoom level'}), 400
+        
         # Determine zoom radius and map type
         # Zoom levels roughly: 5=2000km, 7=1000km, 9=500km, 11=250km, 13=100km
         zoom_radius_km = 5000 / (2 ** (zoom - 5))
@@ -266,7 +302,7 @@ def get_radar():
         map_type = 'radar' if use_national else 'regional-radar'
         
         logger.info(f"Radar request: lat={lat}, lng={lng}, zoom={zoom}, "
-                   f"radius={zoom_radius_km}km, type={map_type}")
+                   f"radius={zoom_radius_km:.1f}km, type={map_type}")
         
         # Check cache
         cache_key = f"{map_type}_{lat}_{lng}_{zoom}_{timestamp or 'latest'}"
@@ -277,13 +313,16 @@ def get_radar():
             logger.debug(f"Cache hit for {cache_key}")
             return send_file(
                 BytesIO(cache_entry['data']),
-                mimetype='image/png'
+                mimetype='image/png',
+                as_attachment=False,
+                download_name='radar.png'
             )
         
         # Get map providers
         providers = api.get_map_providers(lat, lng, map_type)
         
         if not providers:
+            logger.warning(f"No radar providers found for {lat}, {lng}")
             return jsonify({'error': 'No radar providers found'}), 404
         
         # For national radar, just use the single provider
@@ -292,6 +331,7 @@ def get_radar():
             overlays = provider.get('overlays', [])
             
             if not overlays:
+                logger.warning(f"No overlays available for provider {provider.get('name')}")
                 return jsonify({'error': 'No overlays available'}), 404
             
             # Get specific timestamp or latest
@@ -300,6 +340,7 @@ def get_radar():
             else:
                 overlay = overlays[-1]
             
+            logger.info(f"Using national radar: {provider.get('name')}, overlay: {overlay['dateTime']}")
             image_data = api.download_overlay(provider['overlayPath'], overlay['name'])
             
             if not image_data:
@@ -311,7 +352,12 @@ def get_radar():
                 'data': image_data
             }
             
-            return send_file(BytesIO(image_data), mimetype='image/png')
+            return send_file(
+                BytesIO(image_data),
+                mimetype='image/png',
+                as_attachment=False,
+                download_name='radar.png'
+            )
         
         # For regional radar, blend multiple radars based on coverage
         weighted_images = []
@@ -323,10 +369,12 @@ def get_radar():
             )
             
             if coverage < 0.05:  # Skip if coverage is too low
+                logger.debug(f"Skipping {provider['name']}: coverage too low ({coverage:.2%})")
                 continue
             
             overlays = provider.get('overlays', [])
             if not overlays:
+                logger.debug(f"Skipping {provider['name']}: no overlays")
                 continue
             
             # Get specific timestamp or latest
@@ -339,12 +387,14 @@ def get_radar():
             
             if image_data:
                 weighted_images.append((image_data, coverage))
-                logger.debug(f"Added radar {provider['name']} with coverage {coverage:.2f}")
+                logger.info(f"Added radar {provider['name']} with coverage {coverage:.2%}")
         
         if not weighted_images:
+            logger.warning("No radar images available after filtering")
             return jsonify({'error': 'No radar images available'}), 404
         
         # Blend images
+        logger.info(f"Blending {len(weighted_images)} radar images")
         blended_data = RadarBlender.blend_images(weighted_images)
         
         if not blended_data:
@@ -356,9 +406,16 @@ def get_radar():
             'data': blended_data
         }
         
-        return send_file(BytesIO(blended_data), mimetype='image/png')
+        logger.info(f"Successfully returned blended radar image ({len(blended_data)} bytes)")
+        return send_file(
+            BytesIO(blended_data),
+            mimetype='image/png',
+            as_attachment=False,
+            download_name='radar.png'
+        )
         
     except ValueError as e:
+        logger.error(f"Invalid parameters: {e}")
         return jsonify({'error': f'Invalid parameters: {e}'}), 400
     except Exception as e:
         logger.error(f"Error processing radar request: {e}", exc_info=True)
@@ -427,7 +484,8 @@ def index():
     """Root endpoint."""
     return jsonify({
         'name': 'WillyWeather Radar Addon',
-        'version': '1.0.0',
+        'version': '1.0.1',
+        'status': 'running',
         'endpoints': {
             'radar': '/api/radar?lat={lat}&lng={lng}&zoom={zoom}&timestamp={timestamp}',
             'providers': '/api/providers?lat={lat}&lng={lng}&type={type}',
@@ -441,22 +499,27 @@ def main():
     """Main entry point."""
     global api
     
-    logger.info("Starting WillyWeather Radar Addon...")
+    logger.info("=" * 60)
+    logger.info("Starting WillyWeather Radar Addon v1.0.1")
+    logger.info("=" * 60)
     
     # Load configuration
     load_config()
     
     # Initialize API
     api = WillyWeatherAPI(config['api_key'])
+    logger.info("WillyWeather API initialized")
     
     # Start Flask app
     port = int(os.environ.get('PORT', 8099))
-    logger.info(f"Starting web server on port {port}")
+    logger.info(f"Starting web server on 0.0.0.0:{port}")
+    logger.info("=" * 60)
     
     app.run(
         host='0.0.0.0',
         port=port,
-        debug=False
+        debug=False,
+        threaded=True
     )
 
 
