@@ -12,16 +12,33 @@ This Home Assistant add-on fetches and serves Australian weather radar imagery f
 
 ## Installation
 
+### Method 1: Add as Repository (Recommended)
+
 1. Add this repository to your Home Assistant add-on store:
    - Navigate to **Settings** → **Add-ons** → **Add-on Store**
-   - Click the three dots menu (⋮) and select **Repositories**
+   - Click the three dots menu (⋮) in the top right
+   - Select **Repositories**
    - Add: `https://github.com/yourusername/willyweather-radar-addon`
+   - Click **Add**
 
-2. Install the "WillyWeather Radar" add-on
+2. Refresh the add-on store (you may need to close and reopen it)
 
-3. Configure the add-on with your WillyWeather API key
+3. Find "WillyWeather Radar" in the add-on list
 
-4. Start the add-on
+4. Click on it and click **Install**
+
+5. Once installed, go to the **Configuration** tab and add your WillyWeather API key
+
+6. Start the add-on
+
+### Method 2: Manual Installation (Development)
+
+If you're developing or testing:
+
+1. Clone this repository
+2. Copy the entire directory to `/addons/willyweather-radar/` on your Home Assistant instance
+3. Restart the Supervisor
+4. The add-on will appear in your local add-ons list
 
 ## Configuration
 
