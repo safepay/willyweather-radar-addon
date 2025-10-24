@@ -15,7 +15,7 @@ Add this repository to your Home Assistant instance:
 3. Select **Repositories**
 4. Add this URL:
    ```
-   https://github.com/yourusername/willyweather-radar-addon
+   https://github.com/safepay/willyweather-radar-addon
    ```
 5. Click **Add**
 6. Close and reopen the Add-on Store
@@ -41,7 +41,7 @@ See [willyweather-radar/README.md](willyweather-radar/README.md) for detailed do
 
 ## Support
 
-- [Issues](https://github.com/yourusername/willyweather-radar-addon/issues)
+- [Issues](https://github.com/safepay/willyweather-radar-addon/issues)
 - [Home Assistant Community](https://community.home-assistant.io/)
 
 ## License
