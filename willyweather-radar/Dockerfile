@@ -1,23 +1,22 @@
-ARG BUILD_FROM
-FROM $BUILD_FROM
+ARG BUILD_FROM=ghcr.io/home-assistant/aarch64-base:3.19
+FROM ${BUILD_FROM}
 
-# Install requirements
+# Install requirements - use system packages where possible
 RUN apk add --no-cache \
     python3 \
     py3-pip \
     py3-pillow \
     py3-numpy \
-    py3-requests
+    py3-requests \
+    py3-flask
 
 # Copy application files
 COPY rootfs /
 
-# Install Python dependencies
-RUN pip3 install --no-cache-dir \
-    flask==3.0.0 \
-    requests==2.31.0 \
-    pillow==10.1.0 \
-    numpy==1.26.2
+# Install remaining Python dependencies with break-system-packages flag
+# Note: Only install packages not available via apk
+RUN pip3 install --no-cache-dir --break-system-packages \
+    flask==3.0.0
 
 # Set working directory
 WORKDIR /app
