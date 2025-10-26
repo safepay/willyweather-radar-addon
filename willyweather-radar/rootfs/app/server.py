@@ -198,7 +198,60 @@ def should_use_regional_radar(lat, lng, zoom):
     else:
         logger.info(f"Using national: best regional coverage only {best_coverage:.1%}")
         return False, []
+
+def select_best_radar(lat, lng, zoom):
+    """
+    Select the best single radar for the viewport.
+    Returns (use_regional, radar_station, coverage) or (False, None, 0) for national.
+    """
+    zoom_radius_km = 5000 / (2 ** (zoom - 5))
+    
+    # Use national for far zoom
+    if zoom <= 8:
+        logger.info(f"Using national: zoom {zoom} (radius {zoom_radius_km:.0f}km)")
+        return False, None, 0
+    
+    # Find nearby radars
+    nearby = find_nearby_radars(lat, lng, max_distance_km=500)
+    
+    if not nearby:
+        logger.info("Using national: no nearby radars")
+        return False, None, 0
+    
+    # Calculate coverage for each radar
+    best_radar = None
+    best_coverage = 0
+    
+    for station, distance in nearby[:10]:
+        # Radar bounds (approximate ±2.35 degrees)
+        radar_lat = station['geometry']['coordinates'][1]
+        radar_lng = station['geometry']['coordinates'][0]
         
+        bounds = {
+            'minLat': radar_lat - 2.35,
+            'maxLat': radar_lat + 2.35,
+            'minLng': radar_lng - 2.35,
+            'maxLng': radar_lng + 2.35
+        }
+        
+        coverage = RadarBlender.calculate_coverage(bounds, lat, lng, zoom_radius_km)
+        
+        logger.debug(f"  {station['properties']['name']}: distance={distance:.1f}km, coverage={coverage:.1%}")
+        
+        if coverage > best_coverage:
+            best_coverage = coverage
+            best_radar = station
+    
+    # Require at least 20% coverage for regional
+    if best_radar and best_coverage >= 0.20:
+        logger.info(f"Using regional: {best_radar['properties']['name']} "
+                   f"with {best_coverage:.1%} coverage")
+        return True, best_radar, best_coverage
+    else:
+        logger.info(f"Using national: best coverage only {best_coverage:.1%}")
+        return False, None, 0
+
+
 class WillyWeatherAPI:
     """Interface to WillyWeather API."""
     
@@ -523,91 +576,60 @@ def get_radar_info():
 
 @app.route('/api/radar')
 def get_radar():
-    """Get radar imagery for a location."""
+    """Get radar imagery - request specific radar by its coordinates."""
     try:
         lat = float(request.args.get('lat', -33.8688))
         lng = float(request.args.get('lng', 151.2093))
         zoom = int(request.args.get('zoom', 10))
         timestamp = request.args.get('timestamp')
         
-        zoom_radius_km = 5000 / (2 ** (zoom - 5))
+        # Determine best radar for this viewport
+        use_regional, radar_station, coverage = select_best_radar(lat, lng, zoom)
         
-        # Determine which radar(s) to use
-        use_regional, nearby_stations = should_use_regional_radar(lat, lng, zoom)
-        map_type = 'regional-radar' if use_regional else 'radar'
-        
-        logger.info(f"Radar request: lat={lat}, lng={lng}, zoom={zoom}, radius={zoom_radius_km:.1f}km, type={map_type}")
-        
-        # Get providers from API
-        providers = api.get_map_providers(lat, lng, map_type, offset=-120, limit=120)
+        if use_regional:
+            # Request API using RADAR'S coordinates (ensures we get THIS specific radar)
+            radar_lat = radar_station['geometry']['coordinates'][1]
+            radar_lng = radar_station['geometry']['coordinates'][0]
+            
+            logger.info(f"Requesting regional-radar at radar location ({radar_lat:.4f}, {radar_lng:.4f})")
+            providers = api.get_map_providers(radar_lat, radar_lng, 'regional-radar', 
+                                            offset=-120, limit=120)
+        else:
+            # Request national radar
+            logger.info(f"Requesting national radar at map center ({lat:.4f}, {lng:.4f})")
+            providers = api.get_map_providers(lat, lng, 'radar', offset=-120, limit=120)
         
         if not providers:
-            logger.warning("No providers returned from API")
             return jsonify({'error': 'No radar data available'}), 404
         
-        # For NATIONAL radar - use first provider directly
-        if not use_regional:
-            provider = providers[0]
-            overlays = provider.get('overlays', [])
-            
-            if not overlays:
-                return jsonify({'error': 'No overlays available'}), 404
-            
-            # Get specific timestamp or latest
-            if timestamp:
-                overlay = next((o for o in overlays if o['dateTime'] == timestamp), overlays[-1])
-            else:
-                overlay = overlays[-1]
-            
-            logger.info(f"Using national radar, timestamp {overlay['dateTime']}")
-            
-            # Download and return the image directly
-            image_data = api.download_overlay(provider['overlayPath'], overlay['name'])
-            
-            if not image_data:
-                return jsonify({'error': 'Failed to download radar image'}), 500
-            
-            # Return image with bounds in headers
-            response = send_file(
-                BytesIO(image_data),
-                mimetype='image/png',
-                as_attachment=False
-            )
-            
-            response.headers['X-Radar-Bounds-South'] = str(provider['bounds']['minLat'])
-            response.headers['X-Radar-Bounds-West'] = str(provider['bounds']['minLng'])
-            response.headers['X-Radar-Bounds-North'] = str(provider['bounds']['maxLat'])
-            response.headers['X-Radar-Bounds-East'] = str(provider['bounds']['maxLng'])
-            
-            logger.info(f"Successfully returned national radar image ({len(image_data)} bytes)")
-            return response
-        
-        # For REGIONAL radar - use SINGLE best radar (no blending)
-        # The provider returned should be the best one based on should_use_regional_radar logic
         provider = providers[0]
         overlays = provider.get('overlays', [])
         
         if not overlays:
             return jsonify({'error': 'No overlays available'}), 404
         
+        # Verify we got the expected radar
+        if use_regional:
+            logger.info(f"API returned: {provider['name']} (expected: {radar_station['properties']['name']})")
+        
         # Get specific timestamp or latest
         if timestamp:
             overlay = next((o for o in overlays if o['dateTime'] == timestamp), None)
             if not overlay:
-                logger.warning(f"Regional radar {provider['name']} does not have timestamp {timestamp}, using latest")
+                logger.warning(f"Timestamp {timestamp} not found, using latest")
                 overlay = overlays[-1]
         else:
             overlay = overlays[-1]
         
-        logger.info(f"Using regional radar: {provider['name']}, timestamp {overlay['dateTime']}")
+        logger.info(f"Returning {provider['name']}, timestamp {overlay['dateTime']}")
         
-        # Download and return the image directly (no blending)
+        # Download image
         image_data = api.download_overlay(provider['overlayPath'], overlay['name'])
         
         if not image_data:
             return jsonify({'error': 'Failed to download radar image'}), 500
         
-        # Return image with bounds in headers
+        # Return with bounds
         response = send_file(
             BytesIO(image_data),
             mimetype='image/png',
@@ -619,12 +641,13 @@ def get_radar():
         response.headers['X-Radar-Bounds-North'] = str(provider['bounds']['maxLat'])
         response.headers['X-Radar-Bounds-East'] = str(provider['bounds']['maxLng'])
         
-        logger.info(f"Successfully returned regional radar image ({len(image_data)} bytes)")
+        logger.info(f"Successfully returned radar image ({len(image_data)} bytes)")
         return response
         
     except Exception as e:
-        logger.error(f"Error processing radar request: {e}", exc_info=True)
+        logger.error(f"Error: {e}", exc_info=True)
         return jsonify({'error': 'Internal server error'}), 500
+
 
 @app.route('/api/providers')
 def get_providers():
@@ -702,34 +725,36 @@ def get_radar_bounds():
 
 @app.route('/api/timestamps')
 def get_timestamps():
-    """Get available timestamps for radar imagery."""
+    """Get timestamps for the selected radar."""
     try:
         lat = float(request.args.get('lat', -33.8688))
         lng = float(request.args.get('lng', 151.2093))
         zoom = int(request.args.get('zoom', 10))
         
-        # Determine which radar to use
-        use_regional, nearby_stations = should_use_regional_radar(lat, lng, zoom)
-        map_type = 'regional-radar' if use_regional else 'radar'
+        # Use same selection logic
+        use_regional, radar_station, coverage = select_best_radar(lat, lng, zoom)
         
-        providers = api.get_map_providers(lat, lng, map_type, offset=-120, limit=120)
+        if use_regional:
+            radar_lat = radar_station['geometry']['coordinates'][1]
+            radar_lng = radar_station['geometry']['coordinates'][0]
+            providers = api.get_map_providers(radar_lat, radar_lng, 'regional-radar',
+                                            offset=-120, limit=120)
+        else:
+            providers = api.get_map_providers(lat, lng, 'radar', offset=-120, limit=120)
         
         if not providers:
             return jsonify([])
         
-        # Get timestamps from the first (best) provider
-        provider = providers[0]
         timestamps = set()
-        for overlay in provider.get('overlays', []):
+        for overlay in providers[0].get('overlays', []):
             timestamps.add(overlay['dateTime'])
         
-        logger.info(f"Returning {len(timestamps)} timestamps from {provider['name']}")
-        
+        logger.info(f"Returning {len(timestamps)} timestamps from {providers[0]['name']}")
         return jsonify(sorted(list(timestamps)))
         
     except Exception as e:
-        logger.error(f"Error getting timestamps: {e}", exc_info=True)
-        return jsonify({'error': 'Internal server error'}), 500
+        logger.error(f"Error: {e}", exc_info=True)
+        return jsonify([])
         
 @app.route('/')
 def index():
@@ -754,184 +779,6 @@ def index():
         }
     })
 
-# Add this test endpoint temporarily
-@app.route('/api/test/timestamps')
-def test_timestamps():
-    """Test endpoint to see actual API response format."""
-    providers = api.get_map_providers(-37.1, 144.1, 'regional-radar', offset=-60, limit=60)
-    
-    result = []
-    for p in providers[:3]:
-        result.append({
-            'name': p['name'],
-            'bounds': p['bounds'],
-            'overlay_count': len(p.get('overlays', [])),
-            'sample_overlays': p.get('overlays', [])[:3],  # First 3
-            'interval': p.get('interval'),  # If it exists
-            'timezone': p.get('timezone')  # If it exists
-        })
-    
-    return jsonify(result)
-
-@app.route('/api/test/multi-radar-timestamps')
-def test_multi_radar_timestamps():
-    """Check if different radars have matching timestamps."""
-    
-    # Get multiple radars
-    providers = api.get_map_providers(-37.5, 142.0, 'regional-radar', offset=-60, limit=60)
-    
-    result = {
-        'note': 'If timestamps match across radars, they are in UTC. If they differ by 30min, they are in local time.',
-        'radars': []
-    }
-    
-    for p in providers[:3]:
-        overlays = p.get('overlays', [])
-        result['radars'].append({
-            'name': p['name'],
-            'center_lng': (p['bounds']['minLng'] + p['bounds']['maxLng']) / 2,
-            'last_3_timestamps': [o['dateTime'] for o in overlays[-3:]] if overlays else []
-        })
-    
-    return jsonify(result)
-
-@app.route('/api/test/timezone-check')
-def test_timezone_check():
-    """Check timestamps from radars in different timezones."""
-    
-    # Get Melbourne radar (Victoria - UTC+11)
-    melb_providers = api.get_map_providers(-37.8, 145.0, 'regional-radar', offset=-60, limit=60)
-    
-    # Get Mt Gambier radar (South Australia - UTC+10:30)
-    mtg_providers = api.get_map_providers(-37.8, 140.8, 'regional-radar', offset=-60, limit=60)
-    
-    result = {
-        'current_time_melbourne_aedt': 'Should be ~08:10 (UTC+11)',
-        'current_time_adelaide_acdt': 'Should be ~07:40 (UTC+10:30)',
-        'current_time_utc': 'Should be ~21:10',
-        'note': 'If both show ~21:00, they are UTC. If Melbourne shows 08:00 and Mt Gambier shows 07:30, they are local time.',
-        'radars': []
-    }
-    
-    for providers, location in [(melb_providers, 'Melbourne'), (mtg_providers, 'Mt Gambier area')]:
-        if providers:
-            p = providers[0]
-            overlays = p.get('overlays', [])
-            result['radars'].append({
-                'name': p['name'],
-                'query_location': location,
-                'interval': p.get('interval'),
-                'last_3_timestamps': [o['dateTime'] for o in overlays[-3:]] if overlays else [],
-                'total_overlays': len(overlays)
-            })
-    
-    return jsonify(result)
-
-@app.route('/api/test/timestamp-comparison')
-def test_timestamp_comparison():
-    """Compare actual timestamp availability across radars."""
-    
-    # Get multiple radars for a location
-    providers = api.get_map_providers(-37.1, 144.1, 'regional-radar', offset=-120, limit=120)
-    
-    result = {
-        'note': 'Checking which timestamps each radar actually has',
-        'radars': []
-    }
-    
-    for p in providers[:5]:
-        overlays = p.get('overlays', [])
-        timestamps = [o['dateTime'] for o in overlays]
-        
-        result['radars'].append({
-            'name': p['name'],
-            'interval': p.get('interval'),
-            'count': len(timestamps),
-            'all_timestamps': timestamps
-        })
-    
-    # Find common timestamps
-    if len(result['radars']) > 1:
-        all_sets = [set(r['all_timestamps']) for r in result['radars']]
-        common = all_sets[0]
-        for s in all_sets[1:]:
-            common = common.intersection(s)
-        
-        result['common_timestamps'] = sorted(list(common))
-        result['common_count'] = len(common)
-    
-    return jsonify(result)
-
-@app.route('/api/test/ghosting-timestamps')
-def test_ghosting_timestamps():
-    """Test the exact scenario that was causing ghosting."""
-    
-    # Use the exact coordinates from your ghosting logs
-    lat, lng, zoom = -37.05, 144.08, 8
-    
-    zoom_radius_km = 5000 / (2 ** (zoom - 5))
-    
-    # Get providers
-    providers = api.get_map_providers(lat, lng, 'regional-radar', offset=-120, limit=120)
-    
-    result = {
-        'location': f'lat={lat}, lng={lng}, zoom={zoom}',
-        'zoom_radius_km': zoom_radius_km,
-        'note': 'This is the exact scenario that caused ghosting',
-        'radars': []
-    }
-    
-    for p in providers[:5]:
-        overlays = p.get('overlays', [])
-        timestamps = [o['dateTime'] for o in overlays]
-        
-        # Calculate coverage
-        coverage = RadarBlender.calculate_coverage(
-            p['bounds'], lat, lng, zoom_radius_km
-        )
-        
-        qualifies = coverage >= 0.10
-        
-        result['radars'].append({
-            'name': p['name'],
-            'coverage': f"{coverage:.1%}",
-            'qualifies_10pct': 'yes' if qualifies else 'no',  # Changed to string
-            'interval': p.get('interval'),
-            'timestamp_count': len(timestamps),
-            'first_timestamp': timestamps[0] if timestamps else None,
-            'last_timestamp': timestamps[-1] if timestamps else None,
-            'all_timestamps': timestamps
-        })
-    
-    # Find common timestamps among qualified radars
-    qualified = [r for r in result['radars'] if r['qualifies_10pct'] == 'yes']
-    
-    if len(qualified) > 1:
-        all_sets = [set(r['all_timestamps']) for r in qualified]
-        common = all_sets[0]
-        for s in all_sets[1:]:
-            common = common.intersection(s)
-        
-        result['qualified_radar_names'] = [r['name'] for r in qualified]
-        result['common_timestamps'] = sorted(list(common))
-        result['common_count'] = len(common)
-        
-        # Show which timestamps are missing from which radars
-        result['missing_analysis'] = {}
-        all_timestamps = set()
-        for ts_set in all_sets:
-            all_timestamps.update(ts_set)
-            
-        for timestamp in sorted(list(all_timestamps)):
-            has_it = [r['name'] for r in qualified if timestamp in r['all_timestamps']]
-            missing = [r['name'] for r in qualified if timestamp not in r['all_timestamps']]
-            if missing:
-                result['missing_analysis'][timestamp] = {
-                    'has': has_it,
-                    'missing': missing
-                }
-    
-    return jsonify(result)
     
 def main():
     """Main entry point."""
