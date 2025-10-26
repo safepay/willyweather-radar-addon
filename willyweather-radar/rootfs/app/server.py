@@ -886,6 +886,46 @@ def index():
         }
     })
 
+@app.route('/api/test/debug-radar-selection')
+def test_debug_radar_selection():
+    """Debug why radars aren't being selected for blending."""
+    lat, lng, zoom = -37.103206, 144.116305, 8
+    
+    zoom_radius_km = 5000 / (2 ** (zoom - 5))
+    
+    # Find nearby radars
+    nearby = find_nearby_radars(lat, lng, max_distance_km=500)
+    
+    result = {
+        'location': f'lat={lat}, lng={lng}, zoom={zoom}',
+        'zoom_radius_km': zoom_radius_km,
+        'nearby_radars': []
+    }
+    
+    for station, distance in nearby[:10]:
+        radar_lat = station['geometry']['coordinates'][1]
+        radar_lng = station['geometry']['coordinates'][0]
+        radar_name = station['properties']['name']
+        
+        bounds = {
+            'minLat': radar_lat - 2.35,
+            'maxLat': radar_lat + 2.35,
+            'minLng': radar_lng - 2.35,
+            'maxLng': radar_lng + 2.35
+        }
+        
+        coverage = RadarBlender.calculate_coverage(bounds, lat, lng, zoom_radius_km)
+        
+        result['nearby_radars'].append({
+            'name': radar_name,
+            'distance_km': round(distance, 1),
+            'coverage_pct': f"{coverage*100:.1f}%",
+            'qualifies_10pct': coverage >= 0.10,
+            'coordinates': [radar_lng, radar_lat]
+        })
+    
+    return jsonify(result)
+
     
 def main():
     """Main entry point."""
