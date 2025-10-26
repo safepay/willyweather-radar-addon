@@ -639,10 +639,12 @@ def get_radar():
             
             logger.info(f"Checking {provider['name']}: coverage={coverage:.2%}, threshold=5%")
             
-            if coverage < 0.05:
-                logger.debug(f"Skipping {provider['name']}: coverage too low")
+            f# In get_radar endpoint, change the threshold from 0.05 to 0.10 (10%):
+            
+            if coverage < 0.10:  # Raised from 0.05 to 0.10
+                logger.debug(f"Skipping {provider['name']}: coverage too low ({coverage:.2%})")
                 continue
-        
+    
             overlays = provider.get('overlays', [])
             if not overlays:
                 logger.debug(f"Skipping {provider['name']}: no overlays")
@@ -863,9 +865,9 @@ def get_timestamps():
                 provider['bounds'], lat, lng, zoom_radius_km
             )
             
-            logger.info(f"  {provider['name']}: coverage={coverage:.3f} ({'✓ QUALIFIED' if coverage >= 0.05 else '✗ too low'})")
+            logger.info(f"  {provider['name']}: coverage={coverage:.3f} ({'✓ QUALIFIED' if coverage >= 0.10 else '✗ too low'})")
             
-            if coverage >= 0.05:
+            if coverage >= 0.10:
                 qualified_providers.append(provider)
         
         if not qualified_providers:
