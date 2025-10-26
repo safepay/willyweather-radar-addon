@@ -773,6 +773,28 @@ def test_timestamps():
     
     return jsonify(result)
 
+@app.route('/api/test/multi-radar-timestamps')
+def test_multi_radar_timestamps():
+    """Check if different radars have matching timestamps."""
+    
+    # Get multiple radars
+    providers = api.get_map_providers(-37.5, 142.0, 'regional-radar', offset=-60, limit=60)
+    
+    result = {
+        'note': 'If timestamps match across radars, they are in UTC. If they differ by 30min, they are in local time.',
+        'radars': []
+    }
+    
+    for p in providers[:3]:
+        overlays = p.get('overlays', [])
+        result['radars'].append({
+            'name': p['name'],
+            'center_lng': (p['bounds']['minLng'] + p['bounds']['maxLng']) / 2,
+            'last_3_timestamps': [o['dateTime'] for o in overlays[-3:]] if overlays else []
+        })
+    
+    return jsonify(result)
+    
 def main():
     """Main entry point."""
     global api
