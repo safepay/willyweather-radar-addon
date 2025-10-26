@@ -634,6 +634,8 @@ def get_radar():
         weighted_images = []
         all_bounds = []
         
+        # In the get_radar() endpoint, in the regional radar section:
+        
         for provider in providers[:5]:  # Limit to 5 closest radars
             # Calculate coverage
             coverage = RadarBlender.calculate_coverage(
@@ -650,10 +652,38 @@ def get_radar():
                 continue
             
             # Get specific timestamp or latest
+            overlay = None
             if timestamp:
-                overlay = next((o for o in overlays if o['dateTime'] == timestamp), overlays[-1])
+                # Try to find exact timestamp match
+                overlay = next((o for o in overlays if o['dateTime'] == timestamp), None)
+                if not overlay:
+                    # Find closest timestamp within 10 minutes
+                    from datetime import datetime, timedelta
+                    target_time = datetime.strptime(timestamp, '%Y-%m-%d %H:%M:%S')
+                    
+                    closest_overlay = None
+                    min_diff = timedelta(hours=1)
+                    
+                    for o in overlays:
+                        o_time = datetime.strptime(o['dateTime'], '%Y-%m-%d %H:%M:%S')
+                        diff = abs(o_time - target_time)
+                        if diff < min_diff:
+                            min_diff = diff
+                            closest_overlay = o
+                    
+                    # Only use if within 10 minutes
+                    if closest_overlay and min_diff <= timedelta(minutes=10):
+                        overlay = closest_overlay
+                        logger.debug(f"Using closest timestamp for {provider['name']}: {closest_overlay['dateTime']} (diff: {min_diff.total_seconds()}s)")
+                    else:
+                        logger.debug(f"Skipping {provider['name']}: no timestamp within 10min of {timestamp}")
+                        continue
             else:
                 overlay = overlays[-1]
+            
+            if not overlay:
+                logger.debug(f"Skipping {provider['name']}: no suitable overlay found")
+                continue
             
             image_data = api.download_overlay(provider['overlayPath'], overlay['name'])
             
@@ -661,7 +691,7 @@ def get_radar():
                 # Pass image data, weight, AND bounds
                 weighted_images.append((image_data, coverage, provider['bounds']))
                 all_bounds.append(provider['bounds'])
-                logger.info(f"Added radar {provider['name']} with coverage {coverage:.2%}")
+                logger.info(f"Added radar {provider['name']} with coverage {coverage:.2%}, timestamp {overlay['dateTime']}")
         
         if not weighted_images:
             logger.warning("No radar images available after filtering")
@@ -798,9 +828,13 @@ def get_timestamps():
     """
     Get available timestamps for radar imagery.
     
+    For regional radar, returns timestamps that are common across multiple radars
+    to ensure smooth animation when blending.
+    
     Query parameters:
         lat: Latitude
         lng: Longitude
+        zoom: Zoom level
         type: Map type (optional - will be auto-determined if not provided)
     """
     try:
@@ -819,18 +853,50 @@ def get_timestamps():
         if not providers:
             return jsonify([])
         
-        # Get all unique timestamps
-        timestamps = set()
-        for provider in providers:
-            for overlay in provider.get('overlays', []):
-                timestamps.add(overlay['dateTime'])
+        # For national radar, just return all timestamps from the single provider
+        if map_type == 'radar':
+            timestamps = set()
+            for provider in providers:
+                for overlay in provider.get('overlays', []):
+                    timestamps.add(overlay['dateTime'])
+            return jsonify(sorted(list(timestamps)))
         
-        return jsonify(sorted(list(timestamps)))
+        # For regional radar, find COMMON timestamps across multiple providers
+        # This ensures all radars have data for the timestamps we return
+        
+        # Get timestamps from each provider
+        provider_timestamps = []
+        for provider in providers[:5]:  # Only check the providers we'd actually use
+            provider_times = set()
+            for overlay in provider.get('overlays', []):
+                provider_times.add(overlay['dateTime'])
+            if provider_times:
+                provider_timestamps.append(provider_times)
+                logger.debug(f"Provider {provider['name']} has {len(provider_times)} timestamps")
+        
+        if not provider_timestamps:
+            return jsonify([])
+        
+        # Find intersection of all timestamp sets (common timestamps)
+        common_timestamps = provider_timestamps[0]
+        for times in provider_timestamps[1:]:
+            common_timestamps = common_timestamps.intersection(times)
+        
+        logger.info(f"Found {len(common_timestamps)} common timestamps across {len(provider_timestamps)} regional radars")
+        
+        # If we have very few common timestamps, fall back to union
+        # (better to have some animation than none)
+        if len(common_timestamps) < 3:
+            logger.warning(f"Only {len(common_timestamps)} common timestamps - using union instead")
+            common_timestamps = set()
+            for times in provider_timestamps:
+                common_timestamps = common_timestamps.union(times)
+        
+        return jsonify(sorted(list(common_timestamps)))
         
     except Exception as e:
         logger.error(f"Error getting timestamps: {e}", exc_info=True)
         return jsonify({'error': 'Internal server error'}), 500
-
 
 @app.route('/')
 def index():
