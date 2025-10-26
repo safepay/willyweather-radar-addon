@@ -639,9 +639,7 @@ def get_radar():
             
             logger.info(f"Checking {provider['name']}: coverage={coverage:.2%}, threshold=5%")
             
-            f# In get_radar endpoint, change the threshold from 0.05 to 0.10 (10%):
-            
-            if coverage < 0.10:  # Raised from 0.05 to 0.10
+            if coverage < 0.10:  # 10% minimum coverage
                 logger.debug(f"Skipping {provider['name']}: coverage too low ({coverage:.2%})")
                 continue
     
