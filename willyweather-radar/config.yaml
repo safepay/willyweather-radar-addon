@@ -1,5 +1,5 @@
 name: WillyWeather Radar
-version: "1.0.1"
+version: "1.0.2"
 slug: willyweather_radar
 description: Fetch and serve WillyWeather radar imagery with blending support
 url: https://github.com/safepay/willyweather-radar-addon
@@ -18,9 +18,7 @@ ports_description:
   8099/tcp: Web interface
 ingress: true
 ingress_port: 8099
-ingress_stream: false
 panel_icon: mdi:weather-pouring
-panel_title: WillyWeather Radar
 options:
   api_key: ""
   cache_duration: 300
@@ -29,4 +27,3 @@ schema:
   api_key: str
   cache_duration: int(60,3600)?
   log_level: list(debug|info|warning|error)?
-image: ghcr.io/{arch}-addon-willyweather-radar
