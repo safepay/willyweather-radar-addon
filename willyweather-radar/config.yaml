@@ -1,5 +1,5 @@
 name: WillyWeather Radar
-version: "1.0.2"
+version: "1.0.3"
 slug: willyweather_radar
 description: Fetch and serve WillyWeather radar imagery with blending support
 url: https://github.com/safepay/willyweather-radar-addon
