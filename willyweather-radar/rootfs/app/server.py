@@ -174,6 +174,7 @@ def select_radars_for_blending(lat, lng, zoom):
     for station, distance in nearby[:10]:
         radar_lat = station['geometry']['coordinates'][1]
         radar_lng = station['geometry']['coordinates'][0]
+        radar_name = station['properties']['name']
         
         bounds = {
             'minLat': radar_lat - 2.35,
@@ -184,12 +185,12 @@ def select_radars_for_blending(lat, lng, zoom):
         
         coverage = RadarBlender.calculate_coverage(bounds, lat, lng, zoom_radius_km)
         
-        logger.debug(f"  {station['properties']['name']}: coverage={coverage:.1%}, distance={distance:.1f}km")
-        
-        # Use 10% minimum coverage
+        # Log EVERY radar
         if coverage >= 0.10:
             radars_with_coverage.append((station, coverage, distance))
-            logger.info(f"  ✓ {station['properties']['name']} qualifies with {coverage:.1%} coverage")
+            logger.info(f"  ✓ {radar_name} qualifies: coverage={coverage:.1%}, distance={distance:.1f}km")
+        else:
+            logger.info(f"  ✗ {radar_name} rejected: coverage={coverage:.1%} (< 10%), distance={distance:.1f}km")
     
     logger.info(f"Total radars qualifying: {len(radars_with_coverage)}")
     
