@@ -150,33 +150,27 @@ def find_nearby_radars(lat, lng, max_distance_km=500):
 
 def select_radars_for_blending(lat, lng, zoom):
     """
-    Select radar(s) for display based on zoom level and coverage.
+    Select radar(s) for display based on proximity and coverage.
     
-    Simple strategy:
-    - Find nearby radars within 260km
-    - Use best 2-3 radars with >20% coverage
-    - If not enough good radars, use national
+    Strategy:
+    - Use 2-3 nearest radars within 260km with best coverage
+    - Only fall back to national if NO nearby radars available
     """
     zoom_radius_km = 5000 / (2 ** (zoom - 5))
     
-    # Use national for wide zoom (radius > 600km)
-    if zoom_radius_km > 600:
-        logger.info(f"Using national: view too wide (radius {zoom_radius_km:.0f}km)")
-        return False, [], 'national'
-    
-    # Find nearby radars within 260km only
+    # Find nearby radars within 260km
     nearby = find_nearby_radars(lat, lng, max_distance_km=260)
     
-    logger.info(f"Found {len(nearby)} nearby radars within 260km")
+    logger.info(f"Found {len(nearby)} nearby radars within 260km (view radius: {zoom_radius_km:.0f}km)")
     
     if not nearby:
-        logger.info("Using national: no nearby radars")
+        logger.info("Using national: no nearby radars within 260km")
         return False, [], 'national'
     
     # Calculate coverage for each radar
     radars_with_coverage = []
     
-    for station, distance in nearby[:5]:  # Only check first 5
+    for station, distance in nearby[:5]:  # Only check first 5 closest
         radar_lat = station['geometry']['coordinates'][1]
         radar_lng = station['geometry']['coordinates'][0]
         radar_name = station['properties']['name']
@@ -190,15 +184,16 @@ def select_radars_for_blending(lat, lng, zoom):
         
         coverage = RadarBlender.calculate_coverage(bounds, lat, lng, zoom_radius_km)
         
-        # Use 20% minimum coverage (more strict)
-        if coverage >= 0.20:
+        # Use 15% minimum coverage
+        if coverage >= 0.15:
             radars_with_coverage.append((station, coverage, distance))
             logger.info(f"  ✓ {radar_name} qualifies: coverage={coverage:.1%}, distance={distance:.1f}km")
         else:
-            logger.debug(f"  ✗ {radar_name} rejected: coverage={coverage:.1%} (< 20%), distance={distance:.1f}km")
+            logger.debug(f"  ✗ {radar_name} rejected: coverage={coverage:.1%} (< 15%), distance={distance:.1f}km")
     
     logger.info(f"Total radars qualifying: {len(radars_with_coverage)}")
     
+    # If no radars qualify, use national
     if not radars_with_coverage:
         logger.info("Using national: no radars with sufficient coverage")
         return False, [], 'national'
@@ -209,18 +204,18 @@ def select_radars_for_blending(lat, lng, zoom):
     best_radar = radars_with_coverage[0]
     best_coverage = best_radar[1]
     
-    # If one radar covers >80%, use single radar
-    if best_coverage >= 0.80:
+    # If zoomed in very close (zoom 12+) and one radar covers >90%, use single
+    if zoom >= 12 and best_coverage >= 0.90:
         logger.info(f"Using single regional: {best_radar[0]['properties']['name']} "
-                   f"with {best_coverage:.1%} coverage")
+                   f"with {best_coverage:.1%} coverage at zoom {zoom}")
         return True, [best_radar], 'single'
     
-    # Otherwise, blend 2-3 best radars (MAXIMUM 3)
+    # Otherwise, always blend 2-3 best radars
     blend_radars = radars_with_coverage[:3]
     radar_names = [r[0]['properties']['name'] for r in blend_radars]
     
     logger.info(f"Using blended regional: {len(blend_radars)} radars "
-               f"({', '.join(radar_names)})")
+               f"({', '.join(radar_names)}) at zoom {zoom}")
     
     return True, blend_radars, 'blend'
     
