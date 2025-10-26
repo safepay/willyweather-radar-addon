@@ -629,18 +629,20 @@ def get_radar():
         weighted_images = []
         all_bounds = []
         
-        # In the get_radar() endpoint, in the regional radar section:
+        # In get_radar endpoint, add more logging in the regional radar section:
         
-        for provider in providers[:5]:  # Limit to 5 closest radars
+        for provider in providers[:5]:
             # Calculate coverage
             coverage = RadarBlender.calculate_coverage(
                 provider['bounds'], lat, lng, zoom_radius_km
             )
             
-            if coverage < 0.05:  # Skip if coverage is too low
-                logger.debug(f"Skipping {provider['name']}: coverage too low ({coverage:.2%})")
-                continue
+            logger.info(f"Checking {provider['name']}: coverage={coverage:.2%}, threshold=5%")
             
+            if coverage < 0.05:
+                logger.debug(f"Skipping {provider['name']}: coverage too low")
+                continue
+        
             overlays = provider.get('overlays', [])
             if not overlays:
                 logger.debug(f"Skipping {provider['name']}: no overlays")
@@ -825,26 +827,19 @@ def get_timestamps():
     
     For regional radar, returns timestamps that are common across multiple radars
     to ensure smooth animation when blending.
-    
-    Query parameters:
-        lat: Latitude
-        lng: Longitude
-        zoom: Zoom level
-        type: Map type (optional - will be auto-determined if not provided)
     """
     try:
         lat = float(request.args.get('lat', -33.8688))
         lng = float(request.args.get('lng', 151.2093))
         zoom = int(request.args.get('zoom', 10))
         
-        # Determine map type and which radars will be used
-        map_type = request.args.get('type')
-        use_regional = False
+        # Determine map type - ALWAYS recalculate to be consistent
+        use_regional, nearby_stations = should_use_regional_radar(lat, lng, zoom)
+        map_type = 'regional-radar' if use_regional else 'radar'
         
-        if not map_type:
-            use_regional, _ = should_use_regional_radar(lat, lng, zoom)
-            map_type = 'regional-radar' if use_regional else 'radar'
-        else:
+        # Allow manual override
+        if request.args.get('type'):
+            map_type = request.args.get('type')
             use_regional = (map_type == 'regional-radar')
         
         providers = api.get_map_providers(lat, lng, map_type, offset=-120, limit=120)
@@ -852,72 +847,73 @@ def get_timestamps():
         if not providers:
             return jsonify([])
         
-        # For national radar, just return all timestamps from the single provider
+        # For national radar, just return all timestamps
         if not use_regional:
             timestamps = set()
             for provider in providers:
                 for overlay in provider.get('overlays', []):
                     timestamps.add(overlay['dateTime'])
-            logger.debug(f"National radar: {len(timestamps)} timestamps available")
+            logger.info(f"National radar: {len(timestamps)} timestamps available")
             return jsonify(sorted(list(timestamps)))
         
-        # For regional radar, find COMMON timestamps across the radars we'll actually use
+        # For regional radar, use EXACT same logic as get_radar endpoint
         zoom_radius_km = 5000 / (2 ** (zoom - 5))
         
-        # Filter providers by coverage (SAME LOGIC AS get_radar endpoint)
+        # Filter providers exactly like get_radar does
         usable_providers = []
-        for provider in providers[:5]:  # Only check first 5 like in get_radar
+        for provider in providers[:5]:  # Match get_radar limit
             coverage = RadarBlender.calculate_coverage(
                 provider['bounds'], lat, lng, zoom_radius_km
             )
-            if coverage >= 0.05:  # Same threshold as radar blending
+            
+            # Log all coverage calculations
+            logger.debug(f"Provider {provider['name']}: coverage={coverage:.2%}")
+            
+            if coverage >= 0.05:  # Match get_radar threshold exactly
                 usable_providers.append(provider)
-                logger.debug(f"Provider {provider['name']} has coverage {coverage:.2%}")
         
         if not usable_providers:
-            logger.warning("No usable providers found for regional radar")
+            logger.warning("No usable providers found - returning empty")
             return jsonify([])
         
-        logger.info(f"Regional radar: checking timestamps across {len(usable_providers)} providers with good coverage")
+        if len(usable_providers) == 1:
+            logger.warning(f"Only 1 provider ({usable_providers[0]['name']}) has sufficient coverage")
+            logger.warning("This may cause issues if other radars are used during rendering")
+        
+        logger.info(f"Regional timestamps: using {len(usable_providers)} providers")
         
         # Get timestamps from each usable provider
-        provider_timestamps = []
+        provider_timestamps = {}
         for provider in usable_providers:
             provider_times = set()
             for overlay in provider.get('overlays', []):
                 provider_times.add(overlay['dateTime'])
             if provider_times:
-                provider_timestamps.append((provider['name'], provider_times))
-                logger.debug(f"  {provider['name']}: {len(provider_times)} timestamps")
+                provider_timestamps[provider['name']] = provider_times
+                logger.info(f"  {provider['name']}: {len(provider_times)} timestamps")
         
         if not provider_timestamps:
-            logger.warning("No timestamps found from any provider")
             return jsonify([])
         
-        # Find STRICT intersection - timestamps that ALL radars have
-        common_timestamps = provider_timestamps[0][1]
-        for name, times in provider_timestamps[1:]:
-            before = len(common_timestamps)
-            common_timestamps = common_timestamps.intersection(times)
-            after = len(common_timestamps)
-            logger.debug(f"  After intersecting with {name}: {after} common timestamps (removed {before - after})")
+        # Find intersection of ALL provider timestamps
+        common_timestamps = None
+        for name, times in provider_timestamps.items():
+            if common_timestamps is None:
+                common_timestamps = times.copy()
+            else:
+                before = len(common_timestamps)
+                common_timestamps = common_timestamps.intersection(times)
+                logger.info(f"  After {name}: {len(common_timestamps)} common ({before - len(common_timestamps)} removed)")
         
-        logger.info(f"Found {len(common_timestamps)} common timestamps across {len(provider_timestamps)} regional radars")
+        if not common_timestamps:
+            logger.error("No common timestamps found!")
+            # Return first provider's timestamps as fallback
+            first_provider = list(provider_timestamps.keys())[0]
+            logger.warning(f"Falling back to {first_provider} timestamps only")
+            return jsonify(sorted(list(provider_timestamps[first_provider])))
         
-        if len(common_timestamps) == 0:
-            logger.error("No common timestamps found across all radars!")
-            logger.error("This will cause animation issues. Falling back to first provider only.")
-            # Fallback: just use first provider's timestamps
-            return jsonify(sorted(list(provider_timestamps[0][1])))
-        
-        if len(common_timestamps) < 3:
-            logger.warning(f"Only {len(common_timestamps)} common timestamps available")
-            logger.warning(f"Animation will be limited")
-        
-        result = sorted(list(common_timestamps))
-        logger.info(f"Returning {len(result)} common timestamps for smooth blended animation")
-        
-        return jsonify(result)
+        logger.info(f"✓ Returning {len(common_timestamps)} common timestamps")
+        return jsonify(sorted(list(common_timestamps)))
         
     except Exception as e:
         logger.error(f"Error getting timestamps: {e}", exc_info=True)
