@@ -31,6 +31,7 @@ def after_request(response):
     response.headers.add('Access-Control-Allow-Origin', '*')
     response.headers.add('Access-Control-Allow-Headers', 'Content-Type')
     response.headers.add('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+    response.headers.add('Access-Control-Expose-Headers', 'X-Radar-Bounds-South, X-Radar-Bounds-West, X-Radar-Bounds-North, X-Radar-Bounds-East')
     return response
 
 # Configuration
