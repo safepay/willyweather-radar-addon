@@ -8,6 +8,7 @@ import sys
 import time
 from datetime import datetime, timedelta
 from io import BytesIO
+from math import radians, cos, sin, asin, sqrt
 from typing import Dict, List, Optional, Tuple
 
 import requests
@@ -42,6 +43,7 @@ os.makedirs(CACHE_DIR, exist_ok=True)
 # Global configuration
 config = {}
 cache = {}
+RADAR_STATIONS = None
 
 
 def load_config():
@@ -74,6 +76,114 @@ def load_config():
     except Exception as e:
         logger.error(f"Failed to load configuration: {e}", exc_info=True)
         sys.exit(1)
+
+
+def load_radar_stations():
+    """Load radar station data from radars.json"""
+    global RADAR_STATIONS
+    try:
+        radar_file = '/app/radars.json'
+        if not os.path.exists(radar_file):
+            logger.error(f"Radar stations file not found at {radar_file}")
+            RADAR_STATIONS = []
+            return
+            
+        with open(radar_file, 'r') as f:
+            data = json.load(f)
+            RADAR_STATIONS = data['features']
+            logger.info(f"Loaded {len(RADAR_STATIONS)} radar stations")
+    except Exception as e:
+        logger.error(f"Failed to load radar stations: {e}", exc_info=True)
+        RADAR_STATIONS = []
+
+
+def haversine_distance(lat1, lon1, lat2, lon2):
+    """
+    Calculate the great circle distance between two points 
+    on the earth (specified in decimal degrees)
+    Returns distance in kilometers
+    """
+    # Convert decimal degrees to radians
+    lat1, lon1, lat2, lon2 = map(radians, [lat1, lon1, lat2, lon2])
+    
+    # Haversine formula
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    a = sin(dlat/2)**2 + cos(lat1) * cos(lat2) * sin(dlon/2)**2
+    c = 2 * asin(sqrt(a))
+    
+    # Radius of earth in kilometers
+    r = 6371
+    
+    return c * r
+
+
+def find_nearby_radars(lat, lng, max_distance_km=500):
+    """
+    Find radar stations within max_distance_km of the given location.
+    Returns list of (station, distance) tuples sorted by distance.
+    """
+    if not RADAR_STATIONS:
+        return []
+    
+    nearby = []
+    for station in RADAR_STATIONS:
+        coords = station['geometry']['coordinates']
+        station_lng, station_lat = coords[0], coords[1]
+        
+        distance = haversine_distance(lat, station_lat, lng, station_lng)
+        
+        if distance <= max_distance_km:
+            nearby.append((station, distance))
+    
+    # Sort by distance
+    nearby.sort(key=lambda x: x[1])
+    return nearby
+
+
+def should_use_regional_radar(lat, lng, zoom):
+    """
+    Determine if regional radar should be used based on location and zoom.
+    
+    Logic:
+    - Find nearby radars (within 500km)
+    - Calculate view radius from zoom
+    - If view radius < 300km AND we have nearby radars, use regional
+    - Otherwise use national
+    
+    Returns:
+        Tuple of (use_regional: bool, nearby_stations: list)
+    """
+    zoom_radius_km = 5000 / (2 ** (zoom - 5))
+    
+    # If zoomed way out (view radius > 400km), always use national
+    if zoom_radius_km > 400:
+        logger.info(f"Using national: view too large ({zoom_radius_km:.0f}km)")
+        return False, []
+    
+    # Find nearby radars
+    nearby_radars = find_nearby_radars(lat, lng, max_distance_km=500)
+    
+    if not nearby_radars:
+        logger.info(f"Using national: no nearby radars found")
+        return False, []
+    
+    # Count radars that could provide good coverage for this view
+    # A radar provides good coverage if it's within (view_radius + 128km)
+    # because regional radars typically have ~256km diameter coverage
+    coverage_threshold = zoom_radius_km + 128
+    
+    good_coverage_radars = [
+        (station, dist) for station, dist in nearby_radars 
+        if dist <= coverage_threshold
+    ]
+    
+    if len(good_coverage_radars) >= 1:
+        logger.info(f"Using regional: {len(good_coverage_radars)} radars provide coverage (view={zoom_radius_km:.0f}km)")
+        return True, [station for station, _ in good_coverage_radars[:5]]  # Limit to 5 radars
+    else:
+        logger.info(f"Using national: insufficient regional coverage (closest radar {nearby_radars[0][1]:.0f}km away, need <{coverage_threshold:.0f}km)")
+        return False, []
 
 
 class WillyWeatherAPI:
@@ -344,6 +454,7 @@ class RadarBlender:
             logger.error(f"Failed to blend images: {e}", exc_info=True)
             return None
 
+
 # Initialize API
 api = None
 
@@ -353,9 +464,48 @@ def health_check():
     """Health check endpoint."""
     return jsonify({
         'status': 'ok',
-        'version': '1.0.5',
-        'api_configured': bool(config.get('api_key'))
+        'version': '1.0.6',
+        'api_configured': bool(config.get('api_key')),
+        'radar_stations_loaded': len(RADAR_STATIONS) if RADAR_STATIONS else 0
     })
+
+
+@app.route('/api/radar/info')
+def get_radar_info():
+    """
+    Get information about which radar type will be used and why.
+    Useful for debugging and the card UI.
+    """
+    try:
+        lat = float(request.args.get('lat', -33.8688))
+        lng = float(request.args.get('lng', 151.2093))
+        zoom = int(request.args.get('zoom', 10))
+
+        use_regional, nearby_stations = should_use_regional_radar(lat, lng, zoom)
+        zoom_radius_km = 5000 / (2 ** (zoom - 5))
+
+        nearby_radars = find_nearby_radars(lat, lng, max_distance_km=500)
+        
+        return jsonify({
+            'use_regional': use_regional,
+            'map_type': 'regional-radar' if use_regional else 'radar',
+            'view_radius_km': round(zoom_radius_km, 1),
+            'nearby_radars': [
+                {
+                    'name': station['properties']['name'],
+                    'id': station['properties']['id'],
+                    'distance_km': round(dist, 1)
+                }
+                for station, dist in nearby_radars[:10]
+            ],
+            'radars_to_use': [
+                station['properties']['name'] for station in nearby_stations
+            ]
+        })
+        
+    except Exception as e:
+        logger.error(f"Error getting radar info: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
 
 
 @app.route('/api/radar')
@@ -390,13 +540,14 @@ def get_radar():
         if not (1 <= zoom <= 20):
             return jsonify({'error': 'Invalid zoom level'}), 400
 
-        # Determine zoom radius and map type
+        # Determine which radar type to use based on location and zoom
+        use_regional, nearby_stations = should_use_regional_radar(lat, lng, zoom)
+        map_type = 'regional-radar' if use_regional else 'radar'
         zoom_radius_km = 5000 / (2 ** (zoom - 5))
-        use_national = zoom_radius_km > 160
-        map_type = 'radar' if use_national else 'regional-radar'
 
         logger.info(f"Radar request: lat={lat}, lng={lng}, zoom={zoom}, "
-                   f"radius={zoom_radius_km:.1f}km, type={map_type}")
+                   f"radius={zoom_radius_km:.1f}km, type={map_type}, "
+                   f"nearby_radars={len(nearby_stations)}")
         
         # Check cache
         cache_key = f"{map_type}_{lat}_{lng}_{zoom}_{timestamp or 'latest'}"
@@ -424,7 +575,7 @@ def get_radar():
             return jsonify({'error': 'No radar providers found'}), 404
         
         # For national radar, use the provider's actual bounds
-        if use_national:
+        if not use_regional:
             provider = providers[0]
             overlays = provider.get('overlays', [])
             
@@ -560,6 +711,7 @@ def get_radar():
         logger.error(f"Error processing radar request: {e}", exc_info=True)
         return jsonify({'error': 'Internal server error'}), 500
 
+
 @app.route('/api/providers')
 def get_providers():
     """
@@ -642,12 +794,18 @@ def get_timestamps():
     Query parameters:
         lat: Latitude
         lng: Longitude
-        type: Map type
+        type: Map type (optional - will be auto-determined if not provided)
     """
     try:
         lat = float(request.args.get('lat', -33.8688))
         lng = float(request.args.get('lng', 151.2093))
-        map_type = request.args.get('type', 'regional-radar')
+        zoom = int(request.args.get('zoom', 10))
+        
+        # Allow manual override, but auto-determine if not specified
+        map_type = request.args.get('type')
+        if not map_type:
+            use_regional, _ = should_use_regional_radar(lat, lng, zoom)
+            map_type = 'regional-radar' if use_regional else 'radar'
         
         providers = api.get_map_providers(lat, lng, map_type, offset=-120, limit=120)
         
@@ -672,17 +830,19 @@ def index():
     """Root endpoint."""
     return jsonify({
         'name': 'WillyWeather Radar Addon',
-        'version': '1.0.5',
+        'version': '1.0.6',
         'status': 'running',
+        'radar_stations': len(RADAR_STATIONS) if RADAR_STATIONS else 0,
         'endpoints': {
             'radar': '/api/radar?lat={lat}&lng={lng}&zoom={zoom}&timestamp={timestamp}',
             'radar_bounds': '/api/radar/bounds?lat={lat}&lng={lng}&zoom={zoom}',
+            'radar_info': '/api/radar/info?lat={lat}&lng={lng}&zoom={zoom}',
             'providers': '/api/providers?lat={lat}&lng={lng}&type={type}',
-            'timestamps': '/api/timestamps?lat={lat}&lng={lng}&type={type}',
+            'timestamps': '/api/timestamps?lat={lat}&lng={lng}&zoom={zoom}',
             'health': '/api/health'
         },
         'features': {
-            'zoom_threshold': 'National radar for zoom ≤10, regional blending for zoom ≥11',
+            'location_aware_radar_selection': 'Automatically chooses regional or national based on radar proximity',
             'image_smoothing': 'Gaussian blur and unsharp mask for reduced pixelation',
             'google_maps': 'Geographic bounds in response headers (X-Radar-Bounds-*)'
         }
@@ -694,11 +854,14 @@ def main():
     global api
     
     logger.info("=" * 60)
-    logger.info("Starting WillyWeather Radar Addon v1.0.5")
+    logger.info("Starting WillyWeather Radar Addon v1.0.6")
     logger.info("=" * 60)
     
     # Load configuration
     load_config()
+    
+    # Load radar stations
+    load_radar_stations()
     
     # Initialize API
     api = WillyWeatherAPI(config['api_key'])
