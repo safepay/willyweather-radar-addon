@@ -822,18 +822,13 @@ def get_radar_bounds():
 
 @app.route('/api/timestamps')
 def get_timestamps():
-    """
-    Get available timestamps for radar imagery.
-    
-    For regional radar, returns timestamps that are common across multiple radars
-    to ensure smooth animation when blending.
-    """
+    """Get available timestamps for radar imagery."""
     try:
         lat = float(request.args.get('lat', -33.8688))
         lng = float(request.args.get('lng', 151.2093))
         zoom = int(request.args.get('zoom', 10))
         
-        # Determine map type - ALWAYS recalculate to be consistent
+        # Determine map type
         use_regional, nearby_stations = should_use_regional_radar(lat, lng, zoom)
         map_type = 'regional-radar' if use_regional else 'radar'
         
@@ -847,78 +842,75 @@ def get_timestamps():
         if not providers:
             return jsonify([])
         
-        # For national radar, just return all timestamps
+        # For national radar, return all timestamps
         if not use_regional:
             timestamps = set()
             for provider in providers:
                 for overlay in provider.get('overlays', []):
                     timestamps.add(overlay['dateTime'])
-            logger.info(f"National radar: {len(timestamps)} timestamps available")
             return jsonify(sorted(list(timestamps)))
         
-        # For regional radar, use EXACT same logic as get_radar endpoint
+        # For regional radar - find radars that will ACTUALLY be used
         zoom_radius_km = 5000 / (2 ** (zoom - 5))
         
-        # Filter providers exactly like get_radar does
-        usable_providers = []
-        for provider in providers[:5]:  # Match get_radar limit
+        logger.info(f"=== TIMESTAMP CALCULATION ===")
+        logger.info(f"Location: ({lat:.2f}, {lng:.2f}), Zoom: {zoom}, Radius: {zoom_radius_km:.1f}km")
+        
+        # Find ALL radars that meet coverage threshold
+        qualified_providers = []
+        for provider in providers[:5]:
             coverage = RadarBlender.calculate_coverage(
                 provider['bounds'], lat, lng, zoom_radius_km
             )
             
-            # Log all coverage calculations
-            logger.debug(f"Provider {provider['name']}: coverage={coverage:.2%}")
+            logger.info(f"  {provider['name']}: coverage={coverage:.3f} ({'✓ QUALIFIED' if coverage >= 0.05 else '✗ too low'})")
             
-            if coverage >= 0.05:  # Match get_radar threshold exactly
-                usable_providers.append(provider)
+            if coverage >= 0.05:
+                qualified_providers.append(provider)
         
-        if not usable_providers:
-            logger.warning("No usable providers found - returning empty")
+        if not qualified_providers:
+            logger.warning("No qualified providers found")
             return jsonify([])
         
-        if len(usable_providers) == 1:
-            logger.warning(f"Only 1 provider ({usable_providers[0]['name']}) has sufficient coverage")
-            logger.warning("This may cause issues if other radars are used during rendering")
+        logger.info(f"Qualified providers: {[p['name'] for p in qualified_providers]}")
         
-        logger.info(f"Regional timestamps: using {len(usable_providers)} providers")
-        
-        # Get timestamps from each usable provider
-        provider_timestamps = {}
-        for provider in usable_providers:
+        # Get timestamps from EACH qualified provider
+        all_provider_timestamps = {}
+        for provider in qualified_providers:
             provider_times = set()
             for overlay in provider.get('overlays', []):
                 provider_times.add(overlay['dateTime'])
-            if provider_times:
-                provider_timestamps[provider['name']] = provider_times
-                logger.info(f"  {provider['name']}: {len(provider_times)} timestamps")
+            all_provider_timestamps[provider['name']] = provider_times
+            logger.info(f"  {provider['name']}: {len(provider_times)} timestamps")
         
-        if not provider_timestamps:
-            return jsonify([])
-        
-        # Find intersection of ALL provider timestamps
+        # Find STRICT intersection
         common_timestamps = None
-        for name, times in provider_timestamps.items():
+        for provider_name, times in all_provider_timestamps.items():
             if common_timestamps is None:
                 common_timestamps = times.copy()
+                logger.info(f"Starting with {provider_name}: {len(common_timestamps)} timestamps")
             else:
                 before = len(common_timestamps)
                 common_timestamps = common_timestamps.intersection(times)
-                logger.info(f"  After {name}: {len(common_timestamps)} common ({before - len(common_timestamps)} removed)")
+                removed = before - len(common_timestamps)
+                logger.info(f"After intersecting {provider_name}: {len(common_timestamps)} remain ({removed} removed)")
         
-        if not common_timestamps:
-            logger.error("No common timestamps found!")
-            # Return first provider's timestamps as fallback
-            first_provider = list(provider_timestamps.keys())[0]
-            logger.warning(f"Falling back to {first_provider} timestamps only")
-            return jsonify(sorted(list(provider_timestamps[first_provider])))
+        if not common_timestamps or len(common_timestamps) == 0:
+            logger.error("❌ NO COMMON TIMESTAMPS FOUND!")
+            logger.error("This will cause ghosting. Falling back to first provider only.")
+            first_provider_name = list(all_provider_timestamps.keys())[0]
+            return jsonify(sorted(list(all_provider_timestamps[first_provider_name])))
         
-        logger.info(f"✓ Returning {len(common_timestamps)} common timestamps")
-        return jsonify(sorted(list(common_timestamps)))
+        result = sorted(list(common_timestamps))
+        logger.info(f"✓ Returning {len(result)} common timestamps")
+        logger.info(f"=== END TIMESTAMP CALCULATION ===")
+        
+        return jsonify(result)
         
     except Exception as e:
         logger.error(f"Error getting timestamps: {e}", exc_info=True)
         return jsonify({'error': 'Internal server error'}), 500
-
+        
 @app.route('/')
 def index():
     """Root endpoint."""
