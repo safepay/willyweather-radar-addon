@@ -184,8 +184,8 @@ def select_radars_for_blending(lat, lng, zoom):
         
         coverage = RadarBlender.calculate_coverage(bounds, lat, lng, zoom_radius_km)
         
-        # Use 15% minimum coverage
-        if coverage >= 0.15:
+        # Use 10% minimum coverage
+        if coverage >= 0.10:
             radars_with_coverage.append((station, coverage, distance))
             logger.info(f"  ✓ {radar_name} qualifies: coverage={coverage:.1%}, distance={distance:.1f}km")
         else:
