@@ -369,10 +369,9 @@ class RadarBlender:
         try:
             logger.info(f"Blending {len(images)} images at {target_size[0]}x{target_size[1]}")
             
-            # Use uint8 arrays instead of float32 to save memory
-            canvas_array = np.zeros((target_size[1], target_size[0], 4), dtype=np.uint16)  # uint16 for accumulation
+            canvas_array = np.zeros((target_size[1], target_size[0], 4), dtype=np.float32)  # Changed from uint16
             total_weight_array = np.zeros((target_size[1], target_size[0]), dtype=np.float32)
-    
+
             target_lat_range = target_bounds['maxLat'] - target_bounds['minLat']
             target_lng_range = target_bounds['maxLng'] - target_bounds['minLng']
     
