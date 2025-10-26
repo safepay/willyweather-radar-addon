@@ -151,16 +151,6 @@ def find_nearby_radars(lat, lng, max_distance_km=500):
 def select_radars_for_blending(lat, lng, zoom):
     """
     Select radar(s) for display based on zoom level and coverage.
-    
-    Strategy:
-    - Zoom ≤7: National radar (wide view)
-    - Zoom 8-10: Blend multiple regional radars (medium view)
-    - Zoom 11+: Single radar if one covers >80%, otherwise blend
-    
-    Returns:
-        - For national: (False, [], 'national')
-        - For single: (True, [(radar, coverage, distance)], 'single')
-        - For blended: (True, [(radar1, ...), (radar2, ...), ...], 'blend')
     """
     zoom_radius_km = 5000 / (2 ** (zoom - 5))
     
@@ -171,6 +161,8 @@ def select_radars_for_blending(lat, lng, zoom):
     
     # Find nearby radars
     nearby = find_nearby_radars(lat, lng, max_distance_km=500)
+    
+    logger.info(f"Found {len(nearby)} nearby radars within 500km")
     
     if not nearby:
         logger.info("Using national: no nearby radars")
@@ -192,10 +184,14 @@ def select_radars_for_blending(lat, lng, zoom):
         
         coverage = RadarBlender.calculate_coverage(bounds, lat, lng, zoom_radius_km)
         
+        logger.debug(f"  {station['properties']['name']}: coverage={coverage:.1%}, distance={distance:.1f}km")
+        
         # Use 10% minimum coverage
         if coverage >= 0.10:
             radars_with_coverage.append((station, coverage, distance))
-            logger.debug(f"  {station['properties']['name']}: coverage={coverage:.1%}, distance={distance:.1f}km")
+            logger.info(f"  ✓ {station['properties']['name']} qualifies with {coverage:.1%} coverage")
+    
+    logger.info(f"Total radars qualifying: {len(radars_with_coverage)}")
     
     if not radars_with_coverage:
         logger.info("Using national: no radars with sufficient coverage")
@@ -221,7 +217,7 @@ def select_radars_for_blending(lat, lng, zoom):
                f"({', '.join(radar_names)}) at zoom {zoom}")
     
     return True, blend_radars, 'blend'
-
+    
 class WillyWeatherAPI:
     """Interface to WillyWeather API."""
     
