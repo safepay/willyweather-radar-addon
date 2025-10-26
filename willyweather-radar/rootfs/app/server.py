@@ -842,11 +842,16 @@ def get_timestamps():
         lng = float(request.args.get('lng', 151.2093))
         zoom = int(request.args.get('zoom', 10))
         
-        # Allow manual override, but auto-determine if not specified
+        # Determine map type and which radars will be used
         map_type = request.args.get('type')
+        use_regional = False
+        nearby_stations = []
+        
         if not map_type:
-            use_regional, _ = should_use_regional_radar(lat, lng, zoom)
+            use_regional, nearby_stations = should_use_regional_radar(lat, lng, zoom)
             map_type = 'regional-radar' if use_regional else 'radar'
+        else:
+            use_regional = (map_type == 'regional-radar')
         
         providers = api.get_map_providers(lat, lng, map_type, offset=-120, limit=120)
         
@@ -854,50 +859,69 @@ def get_timestamps():
             return jsonify([])
         
         # For national radar, just return all timestamps from the single provider
-        if map_type == 'radar':
+        if not use_regional:
             timestamps = set()
             for provider in providers:
                 for overlay in provider.get('overlays', []):
                     timestamps.add(overlay['dateTime'])
+            logger.debug(f"National radar: {len(timestamps)} timestamps available")
             return jsonify(sorted(list(timestamps)))
         
-        # For regional radar, find COMMON timestamps across multiple providers
-        # This ensures all radars have data for the timestamps we return
+        # For regional radar, find COMMON timestamps across the radars we'll actually use
+        zoom_radius_km = 5000 / (2 ** (zoom - 5))
         
-        # Get timestamps from each provider
+        # Filter providers by coverage (same logic as get_radar)
+        usable_providers = []
+        for provider in providers[:5]:
+            coverage = RadarBlender.calculate_coverage(
+                provider['bounds'], lat, lng, zoom_radius_km
+            )
+            if coverage >= 0.05:  # Same threshold as radar blending
+                usable_providers.append(provider)
+        
+        if not usable_providers:
+            logger.warning("No usable providers found for regional radar")
+            return jsonify([])
+        
+        logger.debug(f"Regional radar: checking timestamps across {len(usable_providers)} providers")
+        
+        # Get timestamps from each usable provider
         provider_timestamps = []
-        for provider in providers[:5]:  # Only check the providers we'd actually use
+        for provider in usable_providers:
             provider_times = set()
             for overlay in provider.get('overlays', []):
                 provider_times.add(overlay['dateTime'])
             if provider_times:
-                provider_timestamps.append(provider_times)
-                logger.debug(f"Provider {provider['name']} has {len(provider_times)} timestamps")
+                provider_timestamps.append((provider['name'], provider_times))
+                logger.debug(f"  {provider['name']}: {len(provider_times)} timestamps")
         
         if not provider_timestamps:
             return jsonify([])
         
-        # Find intersection of all timestamp sets (common timestamps)
-        common_timestamps = provider_timestamps[0]
-        for times in provider_timestamps[1:]:
+        # Find intersection of all timestamp sets (timestamps ALL radars have)
+        common_timestamps = provider_timestamps[0][1]
+        for name, times in provider_timestamps[1:]:
+            before = len(common_timestamps)
             common_timestamps = common_timestamps.intersection(times)
+            after = len(common_timestamps)
+            logger.debug(f"  After intersecting with {name}: {after} common timestamps (removed {before - after})")
         
         logger.info(f"Found {len(common_timestamps)} common timestamps across {len(provider_timestamps)} regional radars")
         
-        # If we have very few common timestamps, fall back to union
-        # (better to have some animation than none)
+        # If we have very few common timestamps, that's a problem
         if len(common_timestamps) < 3:
-            logger.warning(f"Only {len(common_timestamps)} common timestamps - using union instead")
-            common_timestamps = set()
-            for times in provider_timestamps:
-                common_timestamps = common_timestamps.union(times)
+            logger.warning(f"Only {len(common_timestamps)} common timestamps available!")
+            logger.warning(f"Animation may be limited. Consider using national radar at this zoom level.")
         
-        return jsonify(sorted(list(common_timestamps)))
+        result = sorted(list(common_timestamps))
+        logger.debug(f"Returning {len(result)} timestamps for animation")
+        
+        return jsonify(result)
         
     except Exception as e:
         logger.error(f"Error getting timestamps: {e}", exc_info=True)
         return jsonify({'error': 'Internal server error'}), 500
-
+        
 @app.route('/')
 def index():
     """Root endpoint."""
