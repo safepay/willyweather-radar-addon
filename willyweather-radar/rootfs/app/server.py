@@ -569,7 +569,7 @@ def get_radar():
             
             # Return image with bounds in headers
             response = send_file(
-                io.BytesIO(image_data),
+                BytesIO(image_data),
                 mimetype='image/png',
                 as_attachment=False
             )
