@@ -890,10 +890,12 @@ def test_ghosting_timestamps():
             p['bounds'], lat, lng, zoom_radius_km
         )
         
+        qualifies = coverage >= 0.10
+        
         result['radars'].append({
             'name': p['name'],
             'coverage': f"{coverage:.1%}",
-            'qualifies_10pct': coverage >= 0.10,
+            'qualifies_10pct': 'yes' if qualifies else 'no',  # Changed to string
             'interval': p.get('interval'),
             'timestamp_count': len(timestamps),
             'first_timestamp': timestamps[0] if timestamps else None,
@@ -902,7 +904,7 @@ def test_ghosting_timestamps():
         })
     
     # Find common timestamps among qualified radars
-    qualified = [r for r in result['radars'] if r['qualifies_10pct']]
+    qualified = [r for r in result['radars'] if r['qualifies_10pct'] == 'yes']
     
     if len(qualified) > 1:
         all_sets = [set(r['all_timestamps']) for r in qualified]
@@ -916,7 +918,11 @@ def test_ghosting_timestamps():
         
         # Show which timestamps are missing from which radars
         result['missing_analysis'] = {}
-        for timestamp in sorted(list(all_sets[0].union(*all_sets[1:]))):
+        all_timestamps = set()
+        for ts_set in all_sets:
+            all_timestamps.update(ts_set)
+            
+        for timestamp in sorted(list(all_timestamps)):
             has_it = [r['name'] for r in qualified if timestamp in r['all_timestamps']]
             missing = [r['name'] for r in qualified if timestamp not in r['all_timestamps']]
             if missing:
@@ -926,7 +932,7 @@ def test_ghosting_timestamps():
                 }
     
     return jsonify(result)
-
+    
 def main():
     """Main entry point."""
     global api
