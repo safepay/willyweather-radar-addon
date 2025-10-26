@@ -861,7 +861,72 @@ def test_timestamp_comparison():
         result['common_count'] = len(common)
     
     return jsonify(result)
+
+@app.route('/api/test/ghosting-timestamps')
+def test_ghosting_timestamps():
+    """Test the exact scenario that was causing ghosting."""
     
+    # Use the exact coordinates from your ghosting logs
+    lat, lng, zoom = -37.05, 144.08, 8
+    
+    zoom_radius_km = 5000 / (2 ** (zoom - 5))
+    
+    # Get providers
+    providers = api.get_map_providers(lat, lng, 'regional-radar', offset=-120, limit=120)
+    
+    result = {
+        'location': f'lat={lat}, lng={lng}, zoom={zoom}',
+        'zoom_radius_km': zoom_radius_km,
+        'note': 'This is the exact scenario that caused ghosting',
+        'radars': []
+    }
+    
+    for p in providers[:5]:
+        overlays = p.get('overlays', [])
+        timestamps = [o['dateTime'] for o in overlays]
+        
+        # Calculate coverage
+        coverage = RadarBlender.calculate_coverage(
+            p['bounds'], lat, lng, zoom_radius_km
+        )
+        
+        result['radars'].append({
+            'name': p['name'],
+            'coverage': f"{coverage:.1%}",
+            'qualifies_10pct': coverage >= 0.10,
+            'interval': p.get('interval'),
+            'timestamp_count': len(timestamps),
+            'first_timestamp': timestamps[0] if timestamps else None,
+            'last_timestamp': timestamps[-1] if timestamps else None,
+            'all_timestamps': timestamps
+        })
+    
+    # Find common timestamps among qualified radars
+    qualified = [r for r in result['radars'] if r['qualifies_10pct']]
+    
+    if len(qualified) > 1:
+        all_sets = [set(r['all_timestamps']) for r in qualified]
+        common = all_sets[0]
+        for s in all_sets[1:]:
+            common = common.intersection(s)
+        
+        result['qualified_radar_names'] = [r['name'] for r in qualified]
+        result['common_timestamps'] = sorted(list(common))
+        result['common_count'] = len(common)
+        
+        # Show which timestamps are missing from which radars
+        result['missing_analysis'] = {}
+        for timestamp in sorted(list(all_sets[0].union(*all_sets[1:]))):
+            has_it = [r['name'] for r in qualified if timestamp in r['all_timestamps']]
+            missing = [r['name'] for r in qualified if timestamp not in r['all_timestamps']]
+            if missing:
+                result['missing_analysis'][timestamp] = {
+                    'has': has_it,
+                    'missing': missing
+                }
+    
+    return jsonify(result)
+
 def main():
     """Main entry point."""
     global api
