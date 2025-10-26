@@ -754,6 +754,24 @@ def index():
         }
     })
 
+# Add this test endpoint temporarily
+@app.route('/api/test/timestamps')
+def test_timestamps():
+    """Test endpoint to see actual API response format."""
+    providers = api.get_map_providers(-37.1, 144.1, 'regional-radar', offset=-60, limit=60)
+    
+    result = []
+    for p in providers[:3]:
+        result.append({
+            'name': p['name'],
+            'bounds': p['bounds'],
+            'overlay_count': len(p.get('overlays', [])),
+            'sample_overlays': p.get('overlays', [])[:3],  # First 3
+            'interval': p.get('interval'),  # If it exists
+            'timezone': p.get('timezone')  # If it exists
+        })
+    
+    return jsonify(result)
 
 def main():
     """Main entry point."""
