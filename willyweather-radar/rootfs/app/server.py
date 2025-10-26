@@ -391,25 +391,9 @@ def get_radar():
             return jsonify({'error': 'Invalid zoom level'}), 400
 
         # Determine zoom radius and map type
-        # Zoom levels roughly: 5=5000km, 7=1250km, 9=312km, 10=156km, 11=78km, 13=39km
         zoom_radius_km = 5000 / (2 ** (zoom - 5))
-
-        # Use national radar if zoom level <= 10 (>160km radius)
-        # Switch to regional radar at zoom 11+ for detailed blending
         use_national = zoom_radius_km > 160
         map_type = 'radar' if use_national else 'regional-radar'
-
-        # Calculate geographic bounds for Google Maps overlay
-        # Account for Earth's curvature at different latitudes
-        lat_offset = zoom_radius_km / 111.0  # 1 degree latitude ≈ 111km
-        lng_offset = zoom_radius_km / (111.0 * np.cos(np.radians(lat)))  # Adjust for latitude
-
-        bounds = {
-            'south': lat - lat_offset,
-            'west': lng - lng_offset,
-            'north': lat + lat_offset,
-            'east': lng + lng_offset
-        }
 
         logger.info(f"Radar request: lat={lat}, lng={lng}, zoom={zoom}, "
                    f"radius={zoom_radius_km:.1f}km, type={map_type}")
@@ -427,11 +411,9 @@ def get_radar():
                 as_attachment=False,
                 download_name='radar.png'
             )
-            # Add geographic bounds headers for Google Maps compatibility
-            response.headers['X-Radar-Bounds-South'] = str(bounds['south'])
-            response.headers['X-Radar-Bounds-West'] = str(bounds['west'])
-            response.headers['X-Radar-Bounds-North'] = str(bounds['north'])
-            response.headers['X-Radar-Bounds-East'] = str(bounds['east'])
+            # Use cached bounds
+            for key, value in cache_entry['bounds'].items():
+                response.headers[f'X-Radar-Bounds-{key.title()}'] = str(value)
             return response
         
         # Get map providers
@@ -441,7 +423,7 @@ def get_radar():
             logger.warning(f"No radar providers found for {lat}, {lng}")
             return jsonify({'error': 'No radar providers found'}), 404
         
-        # For national radar, just use the single provider
+        # For national radar, use the provider's actual bounds
         if use_national:
             provider = providers[0]
             overlays = provider.get('overlays', [])
@@ -462,10 +444,19 @@ def get_radar():
             if not image_data:
                 return jsonify({'error': 'Failed to download overlay'}), 500
 
-            # Cache result
+            # Use the ACTUAL bounds from the provider
+            actual_bounds = {
+                'south': provider['bounds']['minLat'],
+                'west': provider['bounds']['minLng'],
+                'north': provider['bounds']['maxLat'],
+                'east': provider['bounds']['maxLng']
+            }
+
+            # Cache result with bounds
             cache[cache_key] = {
                 'time': time.time(),
-                'data': image_data
+                'data': image_data,
+                'bounds': actual_bounds
             }
 
             response = send_file(
@@ -474,11 +465,11 @@ def get_radar():
                 as_attachment=False,
                 download_name='radar.png'
             )
-            # Add geographic bounds headers for Google Maps compatibility
-            response.headers['X-Radar-Bounds-South'] = str(bounds['south'])
-            response.headers['X-Radar-Bounds-West'] = str(bounds['west'])
-            response.headers['X-Radar-Bounds-North'] = str(bounds['north'])
-            response.headers['X-Radar-Bounds-East'] = str(bounds['east'])
+            # Add ACTUAL geographic bounds from WillyWeather
+            response.headers['X-Radar-Bounds-South'] = str(actual_bounds['south'])
+            response.headers['X-Radar-Bounds-West'] = str(actual_bounds['west'])
+            response.headers['X-Radar-Bounds-North'] = str(actual_bounds['north'])
+            response.headers['X-Radar-Bounds-East'] = str(actual_bounds['east'])
             return response
         
         # For regional radar, blend multiple radars based on coverage
@@ -533,10 +524,19 @@ def get_radar():
         if not blended_data:
             return jsonify({'error': 'Failed to blend images'}), 500
         
-        # Cache result
+        # Prepare bounds for response (convert to south/west/north/east format)
+        response_bounds = {
+            'south': composite_bounds['minLat'],
+            'west': composite_bounds['minLng'],
+            'north': composite_bounds['maxLat'],
+            'east': composite_bounds['maxLng']
+        }
+        
+        # Cache result with bounds
         cache[cache_key] = {
             'time': time.time(),
-            'data': blended_data
+            'data': blended_data,
+            'bounds': response_bounds
         }
 
         logger.info(f"Successfully returned blended radar image ({len(blended_data)} bytes)")
@@ -546,11 +546,11 @@ def get_radar():
             as_attachment=False,
             download_name='radar.png'
         )
-        # Add geographic bounds headers for Google Maps compatibility
-        response.headers['X-Radar-Bounds-South'] = str(bounds['south'])
-        response.headers['X-Radar-Bounds-West'] = str(bounds['west'])
-        response.headers['X-Radar-Bounds-North'] = str(bounds['north'])
-        response.headers['X-Radar-Bounds-East'] = str(bounds['east'])
+        # Add composite bounds from actual radar coverage
+        response.headers['X-Radar-Bounds-South'] = str(response_bounds['south'])
+        response.headers['X-Radar-Bounds-West'] = str(response_bounds['west'])
+        response.headers['X-Radar-Bounds-North'] = str(response_bounds['north'])
+        response.headers['X-Radar-Bounds-East'] = str(response_bounds['east'])
         return response
         
     except ValueError as e:
@@ -559,7 +559,6 @@ def get_radar():
     except Exception as e:
         logger.error(f"Error processing radar request: {e}", exc_info=True)
         return jsonify({'error': 'Internal server error'}), 500
-
 
 @app.route('/api/providers')
 def get_providers():
