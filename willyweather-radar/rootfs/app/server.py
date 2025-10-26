@@ -151,43 +151,45 @@ def find_nearby_radars(lat, lng, max_distance_km=500):
 def should_use_regional_radar(lat, lng, zoom):
     """
     Determine if regional radar should be used based on location and zoom.
+    
+    Regional radar blending works best at closer zoom levels (zoom 9+)
+    where we're focusing on 1-2 nearby radars with good timestamp alignment.
     """
     zoom_radius_km = 5000 / (2 ** (zoom - 5))
     
-    # Only use national if zoomed VERY far out (view radius > 800km)
-    if zoom_radius_km > 800:
-        logger.info(f"Using national: view too large ({zoom_radius_km:.0f}km)")
+    # At zoom 8 or lower (>312km radius), ALWAYS use national radar
+    # Blending many radars at this scale causes timestamp issues
+    if zoom <= 8:
+        logger.info(f"Using national: zoom too far out (zoom={zoom}, radius={zoom_radius_km:.0f}km)")
         return False, []
     
+    # For zoom 9+, use regional if we have good nearby coverage
     # Find nearby radars
-    nearby_radars = find_nearby_radars(lat, lng, max_distance_km=600)
+    nearby_radars = find_nearby_radars(lat, lng, max_distance_km=400)
     
     if not nearby_radars:
         logger.info(f"Using national: no nearby radars found")
         return False, []
     
-    # Be more aggressive - use regional when we have good stations available
-    max_radar_distance = min(zoom_radius_km + 200, 600)
+    # At close zoom, be more selective about which radars to use
+    # Only use radars that are reasonably close
+    max_radar_distance = min(zoom_radius_km + 100, 400)
     
     usable_radars = [
         (station, dist) for station, dist in nearby_radars 
         if dist <= max_radar_distance
     ]
     
-    # Require at least 1 radar for small views, 2+ for larger views
-    min_radars_needed = 1 if zoom_radius_km < 400 else 2
-    
-    if len(usable_radars) >= min_radars_needed:
-        radar_names = [station['properties']['name'] for station, _ in usable_radars[:5]]
-        logger.info(f"Using regional: {len(usable_radars)} radars available (view={zoom_radius_km:.0f}km)")
+    # Need at least 1 radar for regional mode
+    if len(usable_radars) >= 1:
+        radar_names = [station['properties']['name'] for station, _ in usable_radars[:3]]  # Max 3 radars
+        logger.info(f"Using regional: {len(usable_radars)} radars available (zoom={zoom}, view={zoom_radius_km:.0f}km)")
         logger.info(f"  Radars: {', '.join(radar_names)}")
-        return True, [station for station, _ in usable_radars[:5]]
+        return True, [station for station, _ in usable_radars[:3]]  # Limit to 3 radars
     else:
-        closest_dist = nearby_radars[0][1] if nearby_radars else 0
-        logger.info(f"Using national: insufficient regional coverage")
-        logger.info(f"  View radius: {zoom_radius_km:.0f}km, closest radar: {closest_dist:.0f}km, needed <{max_radar_distance:.0f}km with {min_radars_needed}+ radars")
-        return False, []        
-
+        logger.info(f"Using national: no radars within range")
+        return False, []
+        
 class WillyWeatherAPI:
     """Interface to WillyWeather API."""
     
