@@ -4,8 +4,10 @@ This Home Assistant add-on fetches and serves Australian weather radar imagery f
 
 ## Features
 
-- **Smart Radar Selection**: Automatically chooses between regional and national radar based on zoom level
-- **Multi-Radar Blending**: Combines multiple regional radars for seamless coverage
+- **Smart Radar Selection**: Automatically chooses between regional and national radar based on zoom level (switches at zoom 10)
+- **Multi-Radar Blending**: Combines multiple regional radars for seamless coverage with weighted averaging
+- **Image Smoothing**: Advanced smoothing algorithms reduce pixelation for clearer radar images
+- **Google Maps Compatible**: Geographic bounds provided in response headers for easy map overlay integration
 - **Caching**: Reduces API calls and improves performance
 - **Ingress Support**: Secure access through Home Assistant's ingress system
 - **RESTful API**: Easy integration with custom cards and automations
@@ -67,10 +69,40 @@ GET /api/radar?lat={latitude}&lng={longitude}&zoom={zoom}&timestamp={timestamp}
 **Parameters:**
 - `lat` (required): Latitude (-90 to 90)
 - `lng` (required): Longitude (-180 to 180)
-- `zoom` (required): Map zoom level (5-15)
+- `zoom` (required): Map zoom level (1-20)
+  - Zoom ≤10: National radar coverage (~160km+ radius)
+  - Zoom ≥11: Regional radar blending (~160km- radius)
 - `timestamp` (optional): Specific timestamp (YYYY-MM-DD HH:MM:SS)
 
-**Returns:** PNG image
+**Returns:** PNG image with geographic bounds in response headers:
+- `X-Radar-Bounds-South`: Southern latitude boundary
+- `X-Radar-Bounds-West`: Western longitude boundary
+- `X-Radar-Bounds-North`: Northern latitude boundary
+- `X-Radar-Bounds-East`: Eastern longitude boundary
+
+### Get Radar Bounds
+
+```
+GET /api/radar/bounds?lat={latitude}&lng={longitude}&zoom={zoom}
+```
+
+**Parameters:**
+- `lat` (required): Latitude (-90 to 90)
+- `lng` (required): Longitude (-180 to 180)
+- `zoom` (required): Map zoom level (1-20)
+
+**Returns:** JSON object with geographic bounds:
+```json
+{
+  "south": -34.268,
+  "west": 149.809,
+  "north": -33.468,
+  "east": 152.609,
+  "center_lat": -33.8688,
+  "center_lng": 151.2093,
+  "radius_km": 156.25
+}
+```
 
 ### Get Providers
 
@@ -113,21 +145,34 @@ GET /api/health
 The add-on uses intelligent logic to determine which radar data to serve:
 
 1. **Zoom Level Analysis**: Calculates the approximate viewing radius based on the zoom level
+   - Formula: `zoom_radius_km = 5000 / (2 ^ (zoom - 5))`
+   - Examples: Zoom 10 = 156km, Zoom 11 = 78km, Zoom 13 = 39km
+
 2. **National vs Regional**:
-   - **Zoom > 1500km radius** (covering multiple states): Uses national radar
-   - **Zoom < 1500km radius**: Uses regional radars with blending
+   - **Zoom ≤10 (>160km radius)**: Uses national radar (single source)
+   - **Zoom ≥11 (≤160km radius)**: Uses regional radars with intelligent blending
 
 ### Multi-Radar Blending
 
-For regional radar views:
+For regional radar views (zoom ≥11):
 
-1. Queries WillyWeather for nearby radar stations
-2. Calculates coverage overlap for each radar with the viewing area
-3. Downloads overlays from radars with significant coverage
+1. Queries WillyWeather for up to 5 nearby radar stations
+2. Calculates geographic coverage overlap for each radar with the viewing area
+3. Downloads overlays from radars with >5% coverage
 4. Blends images using weighted averaging based on coverage percentages
-5. Returns a seamless composite image
+5. Applies image smoothing filters for improved visual quality
+6. Returns a seamless composite image
 
-This approach eliminates visible seams between radar coverage areas and provides the best available data for any location.
+### Image Quality Enhancements
+
+All radar images are processed with advanced smoothing algorithms:
+
+- **BICUBIC Interpolation**: High-quality image resizing for smoother results
+- **Gaussian Blur** (radius 0.8): Smooths pixel transitions and reduces artifacts
+- **Unsharp Mask** (radius 1.0, 50%): Preserves detail and sharpness after smoothing
+- **PNG Optimization**: Reduces file size without quality loss
+
+This approach eliminates visible seams between radar coverage areas, reduces pixelation, and provides the best available data for any location.
 
 ## Usage with Custom Cards
 
@@ -140,6 +185,89 @@ const radarUrl = `${addonUrl}/api/radar?lat=${lat}&lng=${lng}&zoom=${zoom}`;
 ```
 
 See the [WillyWeather Radar Card](https://github.com/yourusername/willyweather-radar-card) repository for the companion Lovelace card.
+
+## Google Maps Integration
+
+The addon provides geographic bounds in response headers for easy overlay integration with Google Maps:
+
+### Basic Overlay Example
+
+```javascript
+// Fetch radar image with bounds
+const lat = -33.8688;
+const lng = 151.2093;
+const zoom = 12;
+
+const response = await fetch(`/api/radar?lat=${lat}&lng=${lng}&zoom=${zoom}`);
+const imageBlob = await response.blob();
+
+// Extract bounds from response headers
+const bounds = {
+  south: parseFloat(response.headers.get('X-Radar-Bounds-South')),
+  west: parseFloat(response.headers.get('X-Radar-Bounds-West')),
+  north: parseFloat(response.headers.get('X-Radar-Bounds-North')),
+  east: parseFloat(response.headers.get('X-Radar-Bounds-East'))
+};
+
+// Create Google Maps ground overlay
+const overlay = new google.maps.GroundOverlay(
+  URL.createObjectURL(imageBlob),
+  bounds,
+  { opacity: 0.7 }
+);
+
+overlay.setMap(map);
+```
+
+### Using the Bounds Endpoint
+
+For pre-calculating bounds before fetching the image:
+
+```javascript
+// Get bounds first
+const boundsResponse = await fetch(`/api/radar/bounds?lat=${lat}&lng=${lng}&zoom=${zoom}`);
+const boundsData = await boundsResponse.json();
+
+console.log(`Viewing radius: ${boundsData.radius_km} km`);
+console.log(`Bounds:`, boundsData);
+
+// Then fetch the radar image
+const radarResponse = await fetch(`/api/radar?lat=${lat}&lng=${lng}&zoom=${zoom}`);
+const imageBlob = await radarResponse.blob();
+```
+
+### Dynamic Updates
+
+```javascript
+// Update radar overlay when map view changes
+map.addListener('bounds_changed', async () => {
+  const center = map.getCenter();
+  const zoom = map.getZoom();
+
+  const response = await fetch(
+    `/api/radar?lat=${center.lat()}&lng=${center.lng()}&zoom=${zoom}`
+  );
+
+  const imageBlob = await response.blob();
+  const bounds = {
+    south: parseFloat(response.headers.get('X-Radar-Bounds-South')),
+    west: parseFloat(response.headers.get('X-Radar-Bounds-West')),
+    north: parseFloat(response.headers.get('X-Radar-Bounds-North')),
+    east: parseFloat(response.headers.get('X-Radar-Bounds-East'))
+  };
+
+  // Remove old overlay if exists
+  if (radarOverlay) radarOverlay.setMap(null);
+
+  // Add new overlay
+  radarOverlay = new google.maps.GroundOverlay(
+    URL.createObjectURL(imageBlob),
+    bounds,
+    { opacity: 0.7 }
+  );
+  radarOverlay.setMap(map);
+});
+```
 
 ## Troubleshooting
 
