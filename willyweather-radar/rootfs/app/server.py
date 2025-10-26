@@ -153,8 +153,8 @@ def select_radars_for_blending(lat, lng, zoom):
     Select radar(s) for display based on zoom level and coverage.
     
     Strategy:
-    - Zoom ≤8: National radar (wide view)
-    - Zoom 9-10: Blend multiple regional radars (medium view)
+    - Zoom ≤7: National radar (wide view)
+    - Zoom 8-10: Blend multiple regional radars (medium view)
     - Zoom 11+: Single radar if one covers >80%, otherwise blend
     
     Returns:
@@ -164,8 +164,8 @@ def select_radars_for_blending(lat, lng, zoom):
     """
     zoom_radius_km = 5000 / (2 ** (zoom - 5))
     
-    # Zoom 8 or less: National radar only
-    if zoom <= 8:
+    # Zoom 7 or less: National radar only
+    if zoom <= 7:
         logger.info(f"Using national: zoom {zoom} (radius {zoom_radius_km:.0f}km)")
         return False, [], 'national'
     
