@@ -794,7 +794,39 @@ def test_multi_radar_timestamps():
         })
     
     return jsonify(result)
+
+@app.route('/api/test/timezone-check')
+def test_timezone_check():
+    """Check timestamps from radars in different timezones."""
     
+    # Get Melbourne radar (Victoria - UTC+11)
+    melb_providers = api.get_map_providers(-37.8, 145.0, 'regional-radar', offset=-60, limit=60)
+    
+    # Get Mt Gambier radar (South Australia - UTC+10:30)
+    mtg_providers = api.get_map_providers(-37.8, 140.8, 'regional-radar', offset=-60, limit=60)
+    
+    result = {
+        'current_time_melbourne_aedt': 'Should be ~08:10 (UTC+11)',
+        'current_time_adelaide_acdt': 'Should be ~07:40 (UTC+10:30)',
+        'current_time_utc': 'Should be ~21:10',
+        'note': 'If both show ~21:00, they are UTC. If Melbourne shows 08:00 and Mt Gambier shows 07:30, they are local time.',
+        'radars': []
+    }
+    
+    for providers, location in [(melb_providers, 'Melbourne'), (mtg_providers, 'Mt Gambier area')]:
+        if providers:
+            p = providers[0]
+            overlays = p.get('overlays', [])
+            result['radars'].append({
+                'name': p['name'],
+                'query_location': location,
+                'interval': p.get('interval'),
+                'last_3_timestamps': [o['dateTime'] for o in overlays[-3:]] if overlays else [],
+                'total_overlays': len(overlays)
+            })
+    
+    return jsonify(result)
+
 def main():
     """Main entry point."""
     global api
