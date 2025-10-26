@@ -124,22 +124,29 @@ def find_nearby_radars(lat, lng, max_distance_km=500):
     Returns list of (station, distance) tuples sorted by distance.
     """
     if not RADAR_STATIONS:
+        logger.debug("No radar stations loaded")
         return []
     
     nearby = []
     for station in RADAR_STATIONS:
         coords = station['geometry']['coordinates']
+        # GeoJSON format: [longitude, latitude]
         station_lng, station_lat = coords[0], coords[1]
         
-        distance = haversine_distance(lat, station_lat, lng, station_lng)
+        # haversine_distance expects: (lat1, lng1, lat2, lng2)
+        distance = haversine_distance(lat, lng, station_lat, station_lng)
         
         if distance <= max_distance_km:
             nearby.append((station, distance))
     
-    # Sort by distance
+    # Sort by distance (closest first)
     nearby.sort(key=lambda x: x[1])
+    
+    logger.debug(f"Found {len(nearby)} radars within {max_distance_km}km of ({lat:.2f}, {lng:.2f})")
+    if nearby:
+        logger.debug(f"  Closest: {nearby[0][0]['properties']['name']} at {nearby[0][1]:.1f}km")
+    
     return nearby
-
 
 def should_use_regional_radar(lat, lng, zoom):
     """
