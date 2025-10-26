@@ -861,7 +861,25 @@ def main():
     load_config()
     
     # Load radar stations
+    logger.info("Loading radar stations database...")
     load_radar_stations()
+    
+    # Verify radar stations loaded
+    if not RADAR_STATIONS or len(RADAR_STATIONS) == 0:
+        logger.error("=" * 60)
+        logger.error("❌ CRITICAL: No radar stations loaded!")
+        logger.error("   Location-aware radar selection will NOT work")
+        logger.error("   All requests will fall back to national radar")
+        logger.error("=" * 60)
+    else:
+        logger.info(f"✓ Radar station database ready with {len(RADAR_STATIONS)} stations")
+        
+        # Test the distance calculation with Melbourne
+        test_nearby = find_nearby_radars(-37.8136, 144.9631, max_distance_km=200)
+        if test_nearby:
+            logger.info(f"✓ Distance calculation verified - found {len(test_nearby)} radars near Melbourne")
+        else:
+            logger.warning("⚠ Distance calculation may have issues - no radars found near Melbourne")
     
     # Initialize API
     api = WillyWeatherAPI(config['api_key'])
@@ -878,7 +896,6 @@ def main():
         debug=False,
         threaded=True
     )
-
 
 if __name__ == '__main__':
     main()
