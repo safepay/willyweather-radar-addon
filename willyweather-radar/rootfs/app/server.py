@@ -915,17 +915,17 @@ def test_debug_radar_selection():
         }
         
         coverage = RadarBlender.calculate_coverage(bounds, lat, lng, zoom_radius_km)
+        qualifies = coverage >= 0.10
         
         result['nearby_radars'].append({
             'name': radar_name,
             'distance_km': round(distance, 1),
             'coverage_pct': f"{coverage*100:.1f}%",
-            'qualifies_10pct': coverage >= 0.10,
+            'qualifies_10pct': 'yes' if qualifies else 'no',  # Changed to string
             'coordinates': [radar_lng, radar_lat]
         })
     
     return jsonify(result)
-
     
 def main():
     """Main entry point."""
