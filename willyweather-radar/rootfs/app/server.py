@@ -12,7 +12,7 @@ from typing import Dict, List, Optional, Tuple
 
 import requests
 from flask import Flask, jsonify, request, send_file
-from PIL import Image
+from PIL import Image, ImageFilter
 import numpy as np
 
 # Configure logging
@@ -204,65 +204,83 @@ class RadarBlender:
         return min(inter_area / view_area, 1.0) if view_area > 0 else 0.0
     
     @staticmethod
-    def blend_images(images: List[Tuple[bytes, float]]) -> Optional[bytes]:
+    def blend_images(images: List[Tuple[bytes, float]], smooth: bool = True) -> Optional[bytes]:
         """
-        Blend multiple radar images with weights.
-        
+        Blend multiple radar images with weights and optional smoothing.
+
         Args:
             images: List of (image_bytes, weight) tuples
-            
+            smooth: Apply smoothing filters to reduce pixelation (default True)
+
         Returns:
             Blended image bytes or None
         """
         if not images:
             return None
-        
+
         try:
             # Load all images
             pil_images = []
             weights = []
-            
+
             for img_bytes, weight in images:
                 img = Image.open(BytesIO(img_bytes)).convert('RGBA')
                 pil_images.append(img)
                 weights.append(weight)
-            
+
             # Normalize weights
             total_weight = sum(weights)
             if total_weight > 0:
                 weights = [w / total_weight for w in weights]
             else:
                 weights = [1.0 / len(weights)] * len(weights)
-            
-            # If only one image, return it
+
+            # If only one image, apply smoothing and return
             if len(pil_images) == 1:
+                result_img = pil_images[0]
+                if smooth:
+                    # Apply gentle smoothing for single images
+                    result_img = result_img.filter(ImageFilter.GaussianBlur(radius=0.5))
                 output = BytesIO()
-                pil_images[0].save(output, format='PNG')
+                result_img.save(output, format='PNG', optimize=True)
                 return output.getvalue()
-            
-            # Ensure all images are the same size
+
+            # Ensure all images are the same size using high-quality resampling
             base_size = pil_images[0].size
             for i in range(1, len(pil_images)):
                 if pil_images[i].size != base_size:
-                    pil_images[i] = pil_images[i].resize(base_size, Image.LANCZOS)
-            
-            # Convert to numpy arrays
+                    # Use BICUBIC for smoother results (better than LANCZOS for radar images)
+                    pil_images[i] = pil_images[i].resize(base_size, Image.BICUBIC)
+
+            # Convert to numpy arrays for blending
             arrays = [np.array(img, dtype=np.float32) for img in pil_images]
-            
-            # Blend
+
+            # Weighted blending
             blended = np.zeros_like(arrays[0])
             for arr, weight in zip(arrays, weights):
                 blended += arr * weight
-            
+
             # Convert back to image
             blended = np.clip(blended, 0, 255).astype(np.uint8)
             result_img = Image.fromarray(blended, mode='RGBA')
-            
-            # Save to bytes
+
+            # Apply smoothing filters to reduce pixelation
+            if smooth:
+                # Apply gentle Gaussian blur to smooth transitions
+                result_img = result_img.filter(ImageFilter.GaussianBlur(radius=0.8))
+
+                # Apply slight sharpening to maintain detail after blur
+                result_img = result_img.filter(ImageFilter.UnsharpMask(
+                    radius=1.0,
+                    percent=50,
+                    threshold=2
+                ))
+
+            # Save to bytes with optimization
             output = BytesIO()
-            result_img.save(output, format='PNG')
+            result_img.save(output, format='PNG', optimize=True)
             return output.getvalue()
-            
+
         except Exception as e:
             logger.error(f"Failed to blend images: {e}", exc_info=True)
             return None
@@ -277,7 +295,7 @@ def health_check():
     """Health check endpoint."""
     return jsonify({
         'status': 'ok',
-        'version': '1.0.1',
+        'version': '1.0.5',
         'api_configured': bool(config.get('api_key'))
     })
 
@@ -286,19 +304,26 @@ def health_check():
 def get_radar():
     """
     Get radar image for a location and zoom level.
-    
+
     Query parameters:
         lat: Latitude
         lng: Longitude
         zoom: Zoom level (higher = more zoomed in)
         timestamp: Optional timestamp for specific overlay
+
+    Returns:
+        PNG image with geographic bounds in response headers for Google Maps overlay:
+        - X-Radar-Bounds-South: Southern latitude boundary
+        - X-Radar-Bounds-West: Western longitude boundary
+        - X-Radar-Bounds-North: Northern latitude boundary
+        - X-Radar-Bounds-East: Eastern longitude boundary
     """
     try:
         lat = float(request.args.get('lat', -33.8688))
         lng = float(request.args.get('lng', 151.2093))
         zoom = int(request.args.get('zoom', 10))
         timestamp = request.args.get('timestamp')
-        
+
         # Validate coordinates
         if not (-90 <= lat <= 90):
             return jsonify({'error': 'Invalid latitude'}), 400
@@ -306,15 +331,28 @@ def get_radar():
             return jsonify({'error': 'Invalid longitude'}), 400
         if not (1 <= zoom <= 20):
             return jsonify({'error': 'Invalid zoom level'}), 400
-        
+
         # Determine zoom radius and map type
-        # Zoom levels roughly: 5=2000km, 7=1000km, 9=500km, 11=250km, 13=100km
+        # Zoom levels roughly: 5=5000km, 7=1250km, 9=312km, 10=156km, 11=78km, 13=39km
         zoom_radius_km = 5000 / (2 ** (zoom - 5))
-        
-        # Use national radar if zoom is very wide (>1500km radius, covering multiple states)
-        use_national = zoom_radius_km > 1500
+
+        # Use national radar if zoom level <= 10 (>160km radius)
+        # Switch to regional radar at zoom 11+ for detailed blending
+        use_national = zoom_radius_km > 160
         map_type = 'radar' if use_national else 'regional-radar'
-        
+
+        # Calculate geographic bounds for Google Maps overlay
+        # Account for Earth's curvature at different latitudes
+        lat_offset = zoom_radius_km / 111.0  # 1 degree latitude ≈ 111km
+        lng_offset = zoom_radius_km / (111.0 * np.cos(np.radians(lat)))  # Adjust for latitude
+
+        bounds = {
+            'south': lat - lat_offset,
+            'west': lng - lng_offset,
+            'north': lat + lat_offset,
+            'east': lng + lng_offset
+        }
+
         logger.info(f"Radar request: lat={lat}, lng={lng}, zoom={zoom}, "
                    f"radius={zoom_radius_km:.1f}km, type={map_type}")
         
@@ -325,12 +363,18 @@ def get_radar():
         
         if cache_entry and (time.time() - cache_entry['time']) < cache_duration:
             logger.debug(f"Cache hit for {cache_key}")
-            return send_file(
+            response = send_file(
                 BytesIO(cache_entry['data']),
                 mimetype='image/png',
                 as_attachment=False,
                 download_name='radar.png'
             )
+            # Add geographic bounds headers for Google Maps compatibility
+            response.headers['X-Radar-Bounds-South'] = str(bounds['south'])
+            response.headers['X-Radar-Bounds-West'] = str(bounds['west'])
+            response.headers['X-Radar-Bounds-North'] = str(bounds['north'])
+            response.headers['X-Radar-Bounds-East'] = str(bounds['east'])
+            return response
         
         # Get map providers
         providers = api.get_map_providers(lat, lng, map_type)
@@ -356,22 +400,28 @@ def get_radar():
             
             logger.info(f"Using national radar: {provider.get('name')}, overlay: {overlay['dateTime']}")
             image_data = api.download_overlay(provider['overlayPath'], overlay['name'])
-            
+
             if not image_data:
                 return jsonify({'error': 'Failed to download overlay'}), 500
-            
+
             # Cache result
             cache[cache_key] = {
                 'time': time.time(),
                 'data': image_data
             }
-            
-            return send_file(
+
+            response = send_file(
                 BytesIO(image_data),
                 mimetype='image/png',
                 as_attachment=False,
                 download_name='radar.png'
             )
+            # Add geographic bounds headers for Google Maps compatibility
+            response.headers['X-Radar-Bounds-South'] = str(bounds['south'])
+            response.headers['X-Radar-Bounds-West'] = str(bounds['west'])
+            response.headers['X-Radar-Bounds-North'] = str(bounds['north'])
+            response.headers['X-Radar-Bounds-East'] = str(bounds['east'])
+            return response
         
         # For regional radar, blend multiple radars based on coverage
         weighted_images = []
@@ -419,14 +469,20 @@ def get_radar():
             'time': time.time(),
             'data': blended_data
         }
-        
+
         logger.info(f"Successfully returned blended radar image ({len(blended_data)} bytes)")
-        return send_file(
+        response = send_file(
             BytesIO(blended_data),
             mimetype='image/png',
             as_attachment=False,
             download_name='radar.png'
         )
+        # Add geographic bounds headers for Google Maps compatibility
+        response.headers['X-Radar-Bounds-South'] = str(bounds['south'])
+        response.headers['X-Radar-Bounds-West'] = str(bounds['west'])
+        response.headers['X-Radar-Bounds-North'] = str(bounds['north'])
+        response.headers['X-Radar-Bounds-East'] = str(bounds['east'])
+        return response
         
     except ValueError as e:
         logger.error(f"Invalid parameters: {e}")
@@ -457,6 +513,56 @@ def get_providers():
         
     except Exception as e:
         logger.error(f"Error getting providers: {e}", exc_info=True)
+        return jsonify({'error': 'Internal server error'}), 500
+
+
+@app.route('/api/radar/bounds')
+def get_radar_bounds():
+    """
+    Get geographic bounds for a radar view (for Google Maps overlay setup).
+
+    Query parameters:
+        lat: Latitude
+        lng: Longitude
+        zoom: Zoom level
+
+    Returns:
+        JSON with bounds: {south, west, north, east}
+    """
+    try:
+        lat = float(request.args.get('lat', -33.8688))
+        lng = float(request.args.get('lng', 151.2093))
+        zoom = int(request.args.get('zoom', 10))
+
+        # Validate coordinates
+        if not (-90 <= lat <= 90):
+            return jsonify({'error': 'Invalid latitude'}), 400
+        if not (-180 <= lng <= 180):
+            return jsonify({'error': 'Invalid longitude'}), 400
+        if not (1 <= zoom <= 20):
+            return jsonify({'error': 'Invalid zoom level'}), 400
+
+        # Calculate zoom radius
+        zoom_radius_km = 5000 / (2 ** (zoom - 5))
+
+        # Calculate geographic bounds
+        lat_offset = zoom_radius_km / 111.0
+        lng_offset = zoom_radius_km / (111.0 * np.cos(np.radians(lat)))
+
+        bounds = {
+            'south': lat - lat_offset,
+            'west': lng - lng_offset,
+            'north': lat + lat_offset,
+            'east': lng + lng_offset,
+            'center_lat': lat,
+            'center_lng': lng,
+            'radius_km': zoom_radius_km
+        }
+
+        return jsonify(bounds)
+
+    except Exception as e:
+        logger.error(f"Error calculating bounds: {e}", exc_info=True)
         return jsonify({'error': 'Internal server error'}), 500
 
 
@@ -498,13 +604,19 @@ def index():
     """Root endpoint."""
     return jsonify({
         'name': 'WillyWeather Radar Addon',
-        'version': '1.0.1',
+        'version': '1.0.5',
         'status': 'running',
         'endpoints': {
             'radar': '/api/radar?lat={lat}&lng={lng}&zoom={zoom}&timestamp={timestamp}',
+            'radar_bounds': '/api/radar/bounds?lat={lat}&lng={lng}&zoom={zoom}',
             'providers': '/api/providers?lat={lat}&lng={lng}&type={type}',
             'timestamps': '/api/timestamps?lat={lat}&lng={lng}&type={type}',
             'health': '/api/health'
+        },
+        'features': {
+            'zoom_threshold': 'National radar for zoom ≤10, regional blending for zoom ≥11',
+            'image_smoothing': 'Gaussian blur and unsharp mask for reduced pixelation',
+            'google_maps': 'Geographic bounds in response headers (X-Radar-Bounds-*)'
         }
     })
 
@@ -514,7 +626,7 @@ def main():
     global api
     
     logger.info("=" * 60)
-    logger.info("Starting WillyWeather Radar Addon v1.0.1")
+    logger.info("Starting WillyWeather Radar Addon v1.0.5")
     logger.info("=" * 60)
     
     # Load configuration
