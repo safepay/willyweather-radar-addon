@@ -349,18 +349,17 @@ class RadarBlender:
     
     @staticmethod
     def blend_images(images: List[Tuple[bytes, float, Dict]], target_bounds: Dict, 
-                     target_size: Tuple[int, int] = (1024, 1024), smooth: bool = True) -> Optional[bytes]:
+                     target_size: Tuple[int, int] = (512, 512),  # REDUCED from 1024
+                     smooth: bool = False) -> Optional[bytes]:  # DISABLED smoothing by default
         """
-        Blend multiple radar images with weights and optional smoothing.
+        Memory-efficient radar image blending.
         
-        Each radar image is reprojected to the target bounds before blending.
-    
         Args:
             images: List of (image_bytes, weight, bounds_dict) tuples
-            target_bounds: Dict with 'minLat', 'maxLat', 'minLng', 'maxLng' for output
-            target_size: Output image size (width, height)
-            smooth: Apply smoothing filters to reduce pixelation (default True)
-    
+            target_bounds: Output bounds
+            target_size: Output size (smaller = less memory)
+            smooth: Apply smoothing (costs memory)
+        
         Returns:
             Blended image bytes or None
         """
@@ -368,35 +367,35 @@ class RadarBlender:
             return None
     
         try:
-            # Create a blank canvas at target bounds
-            canvas = Image.new('RGBA', target_size, (0, 0, 0, 0))
-            canvas_array = np.zeros((target_size[1], target_size[0], 4), dtype=np.float32)
+            logger.info(f"Blending {len(images)} images at {target_size[0]}x{target_size[1]}")
+            
+            # Use uint8 arrays instead of float32 to save memory
+            canvas_array = np.zeros((target_size[1], target_size[0], 4), dtype=np.uint16)  # uint16 for accumulation
             total_weight_array = np.zeros((target_size[1], target_size[0]), dtype=np.float32)
     
             target_lat_range = target_bounds['maxLat'] - target_bounds['minLat']
             target_lng_range = target_bounds['maxLng'] - target_bounds['minLng']
     
-            for img_bytes, weight, img_bounds in images:
-                # Load the radar image
-                radar_img = Image.open(BytesIO(img_bytes)).convert('RGBA')
-                radar_array = np.array(radar_img, dtype=np.float32)
+            for idx, (img_bytes, weight, img_bounds) in enumerate(images):
+                logger.debug(f"Processing radar {idx+1}/{len(images)}")
                 
-                # Calculate where this radar image maps onto the target canvas
-                # Radar image bounds
+                # Load radar image
+                radar_img = Image.open(BytesIO(img_bytes)).convert('RGBA')
+                radar_array = np.array(radar_img, dtype=np.uint8)  # Keep as uint8
+                
+                # Calculate overlap region
                 radar_lat_min = img_bounds['minLat']
                 radar_lat_max = img_bounds['maxLat']
                 radar_lng_min = img_bounds['minLng']
                 radar_lng_max = img_bounds['maxLng']
                 
-                # Calculate overlap region in target coordinates
                 overlap_lat_min = max(target_bounds['minLat'], radar_lat_min)
                 overlap_lat_max = min(target_bounds['maxLat'], radar_lat_max)
                 overlap_lng_min = max(target_bounds['minLng'], radar_lng_min)
                 overlap_lng_max = min(target_bounds['maxLng'], radar_lng_max)
                 
-                # Skip if no overlap
                 if overlap_lat_min >= overlap_lat_max or overlap_lng_min >= overlap_lng_max:
-                    logger.debug(f"Skipping image: no overlap with target bounds")
+                    logger.debug(f"Radar {idx+1}: no overlap, skipping")
                     continue
                 
                 # Calculate pixel coordinates in target canvas
@@ -405,7 +404,7 @@ class RadarBlender:
                 canvas_y_start = int((target_bounds['maxLat'] - overlap_lat_max) / target_lat_range * target_size[1])
                 canvas_y_end = int((target_bounds['maxLat'] - overlap_lat_min) / target_lat_range * target_size[1])
                 
-                # Calculate source pixel coordinates in radar image
+                # Calculate source coordinates
                 radar_lat_range = radar_lat_max - radar_lat_min
                 radar_lng_range = radar_lng_max - radar_lng_min
                 radar_height, radar_width = radar_array.shape[:2]
@@ -415,7 +414,7 @@ class RadarBlender:
                 src_y_start = int((radar_lat_max - overlap_lat_max) / radar_lat_range * radar_height)
                 src_y_end = int((radar_lat_max - overlap_lat_min) / radar_lat_range * radar_height)
                 
-                # Extract the relevant portion of the radar image
+                # Bounds checking
                 src_x_start = max(0, min(src_x_start, radar_width - 1))
                 src_x_end = max(0, min(src_x_end, radar_width))
                 src_y_start = max(0, min(src_y_start, radar_height - 1))
@@ -424,20 +423,21 @@ class RadarBlender:
                 if src_x_end <= src_x_start or src_y_end <= src_y_start:
                     continue
                 
+                # Extract and resize
                 radar_crop = radar_array[src_y_start:src_y_end, src_x_start:src_x_end]
                 
-                # Resize to fit the canvas region using high-quality interpolation
                 canvas_width = canvas_x_end - canvas_x_start
                 canvas_height = canvas_y_end - canvas_y_start
                 
                 if canvas_width <= 0 or canvas_height <= 0:
                     continue
                 
-                radar_crop_img = Image.fromarray(radar_crop.astype(np.uint8), mode='RGBA')
-                radar_crop_resized = radar_crop_img.resize((canvas_width, canvas_height), Image.BICUBIC)
-                radar_crop_array = np.array(radar_crop_resized, dtype=np.float32)
+                radar_crop_img = Image.fromarray(radar_crop, mode='RGBA')
+                # Use LANCZOS for better quality at lower resolution
+                radar_crop_resized = radar_crop_img.resize((canvas_width, canvas_height), Image.LANCZOS)
+                radar_crop_array = np.array(radar_crop_resized, dtype=np.uint8)
                 
-                # Ensure canvas coordinates are valid
+                # Bounds checking for canvas
                 canvas_y_start = max(0, min(canvas_y_start, target_size[1]))
                 canvas_y_end = max(0, min(canvas_y_end, target_size[1]))
                 canvas_x_start = max(0, min(canvas_x_start, target_size[0]))
@@ -446,47 +446,48 @@ class RadarBlender:
                 if canvas_y_end <= canvas_y_start or canvas_x_end <= canvas_x_start:
                     continue
                 
-                # Adjust crop size if needed
+                # Adjust crop size
                 actual_height = canvas_y_end - canvas_y_start
                 actual_width = canvas_x_end - canvas_x_start
                 radar_crop_array = radar_crop_array[:actual_height, :actual_width]
                 
-                # Create a weight mask (higher alpha = more weight)
-                alpha_channel = radar_crop_array[:, :, 3] / 255.0
+                # Weight by alpha channel
+                alpha_channel = radar_crop_array[:, :, 3].astype(np.float32) / 255.0
                 pixel_weight = alpha_channel * weight
                 
-                # Add to canvas with weighted averaging
+                # Accumulate with uint16 to prevent overflow
                 canvas_array[canvas_y_start:canvas_y_end, canvas_x_start:canvas_x_end] += \
-                    radar_crop_array * pixel_weight[:, :, np.newaxis]
+                    radar_crop_array.astype(np.uint16) * pixel_weight[:, :, np.newaxis]
                 total_weight_array[canvas_y_start:canvas_y_end, canvas_x_start:canvas_x_end] += pixel_weight
+                
+                logger.debug(f"Radar {idx+1}: added to canvas")
     
             # Normalize by total weight
             mask = total_weight_array > 0
             for i in range(4):
-                canvas_array[:, :, i][mask] /= total_weight_array[mask]
+                canvas_array[:, :, i][mask] = (canvas_array[:, :, i][mask] / total_weight_array[mask]).astype(np.uint16)
     
-            # Convert back to image
+            # Convert to uint8
             canvas_array = np.clip(canvas_array, 0, 255).astype(np.uint8)
             result_img = Image.fromarray(canvas_array, mode='RGBA')
     
-            # Apply smoothing filters to reduce pixelation
+            # Optional smoothing (costs memory, disabled by default)
             if smooth:
-                result_img = result_img.filter(ImageFilter.GaussianBlur(radius=0.8))
-                result_img = result_img.filter(ImageFilter.UnsharpMask(
-                    radius=1.0,
-                    percent=50,
-                    threshold=2
-                ))
+                result_img = result_img.filter(ImageFilter.GaussianBlur(radius=0.5))
     
-            # Save to bytes with optimization
+            # Save with compression
             output = BytesIO()
-            result_img.save(output, format='PNG', optimize=True)
+            result_img.save(output, format='PNG', optimize=True, compress_level=6)
+            
+            result_size = len(output.getvalue())
+            logger.info(f"Blending complete: output size {result_size} bytes")
+            
             return output.getvalue()
     
         except Exception as e:
             logger.error(f"Failed to blend images: {e}", exc_info=True)
             return None
-
+        
 
 # Initialize API
 api = None
@@ -687,8 +688,8 @@ def get_radar():
         blended_image = RadarBlender.blend_images(
             weighted_images,
             composite_bounds,
-            target_size=(2048, 2048),
-            smooth=True
+            target_size=(512, 512),
+            smooth=False
         )
         
         if not blended_image:
