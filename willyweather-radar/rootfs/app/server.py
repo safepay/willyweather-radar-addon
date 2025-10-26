@@ -151,20 +151,10 @@ def find_nearby_radars(lat, lng, max_distance_km=500):
 def should_use_regional_radar(lat, lng, zoom):
     """
     Determine if regional radar should be used based on location and zoom.
-    
-    Logic:
-    - Find nearby radars (within 500km)
-    - Calculate view radius from zoom
-    - Use regional if we have nearby radars that can provide good coverage
-    - Otherwise use national
-    
-    Returns:
-        Tuple of (use_regional: bool, nearby_stations: list)
     """
     zoom_radius_km = 5000 / (2 ** (zoom - 5))
     
     # Only use national if zoomed VERY far out (view radius > 800km)
-    # This is roughly zoom 7 or less
     if zoom_radius_km > 800:
         logger.info(f"Using national: view too large ({zoom_radius_km:.0f}km)")
         return False, []
@@ -176,12 +166,7 @@ def should_use_regional_radar(lat, lng, zoom):
         logger.info(f"Using national: no nearby radars found")
         return False, []
     
-    # Regional radars typically have ~256km diameter coverage (128km radius)
-    # Be more aggressive - if we have radars within range, use them
-    # Even for large views, multiple radars can provide better detail than national
-    
-    # For views up to 800km, we want radars that are within the view + some buffer
-    # The buffer accounts for radar coverage extending beyond their center point
+    # Be more aggressive - use regional when we have good stations available
     max_radar_distance = min(zoom_radius_km + 200, 600)
     
     usable_radars = [
@@ -196,13 +181,12 @@ def should_use_regional_radar(lat, lng, zoom):
         radar_names = [station['properties']['name'] for station, _ in usable_radars[:5]]
         logger.info(f"Using regional: {len(usable_radars)} radars available (view={zoom_radius_km:.0f}km)")
         logger.info(f"  Radars: {', '.join(radar_names)}")
-        return True, [station for station, _ in usable_radars[:5]]  # Limit to 5 radars
+        return True, [station for station, _ in usable_radars[:5]]
     else:
         closest_dist = nearby_radars[0][1] if nearby_radars else 0
         logger.info(f"Using national: insufficient regional coverage")
         logger.info(f"  View radius: {zoom_radius_km:.0f}km, closest radar: {closest_dist:.0f}km, needed <{max_radar_distance:.0f}km with {min_radars_needed}+ radars")
-        return False, []
-        
+        return False, []        
 
 class WillyWeatherAPI:
     """Interface to WillyWeather API."""
@@ -856,10 +840,9 @@ def get_timestamps():
         # Determine map type and which radars will be used
         map_type = request.args.get('type')
         use_regional = False
-        nearby_stations = []
         
         if not map_type:
-            use_regional, nearby_stations = should_use_regional_radar(lat, lng, zoom)
+            use_regional, _ = should_use_regional_radar(lat, lng, zoom)
             map_type = 'regional-radar' if use_regional else 'radar'
         else:
             use_regional = (map_type == 'regional-radar')
@@ -881,20 +864,21 @@ def get_timestamps():
         # For regional radar, find COMMON timestamps across the radars we'll actually use
         zoom_radius_km = 5000 / (2 ** (zoom - 5))
         
-        # Filter providers by coverage (same logic as get_radar)
+        # Filter providers by coverage (SAME LOGIC AS get_radar endpoint)
         usable_providers = []
-        for provider in providers[:5]:
+        for provider in providers[:5]:  # Only check first 5 like in get_radar
             coverage = RadarBlender.calculate_coverage(
                 provider['bounds'], lat, lng, zoom_radius_km
             )
             if coverage >= 0.05:  # Same threshold as radar blending
                 usable_providers.append(provider)
+                logger.debug(f"Provider {provider['name']} has coverage {coverage:.2%}")
         
         if not usable_providers:
             logger.warning("No usable providers found for regional radar")
             return jsonify([])
         
-        logger.debug(f"Regional radar: checking timestamps across {len(usable_providers)} providers")
+        logger.info(f"Regional radar: checking timestamps across {len(usable_providers)} providers with good coverage")
         
         # Get timestamps from each usable provider
         provider_timestamps = []
@@ -907,9 +891,10 @@ def get_timestamps():
                 logger.debug(f"  {provider['name']}: {len(provider_times)} timestamps")
         
         if not provider_timestamps:
+            logger.warning("No timestamps found from any provider")
             return jsonify([])
         
-        # Find intersection of all timestamp sets (timestamps ALL radars have)
+        # Find STRICT intersection - timestamps that ALL radars have
         common_timestamps = provider_timestamps[0][1]
         for name, times in provider_timestamps[1:]:
             before = len(common_timestamps)
@@ -919,20 +904,25 @@ def get_timestamps():
         
         logger.info(f"Found {len(common_timestamps)} common timestamps across {len(provider_timestamps)} regional radars")
         
-        # If we have very few common timestamps, that's a problem
+        if len(common_timestamps) == 0:
+            logger.error("No common timestamps found across all radars!")
+            logger.error("This will cause animation issues. Falling back to first provider only.")
+            # Fallback: just use first provider's timestamps
+            return jsonify(sorted(list(provider_timestamps[0][1])))
+        
         if len(common_timestamps) < 3:
-            logger.warning(f"Only {len(common_timestamps)} common timestamps available!")
-            logger.warning(f"Animation may be limited. Consider using national radar at this zoom level.")
+            logger.warning(f"Only {len(common_timestamps)} common timestamps available")
+            logger.warning(f"Animation will be limited")
         
         result = sorted(list(common_timestamps))
-        logger.debug(f"Returning {len(result)} timestamps for animation")
+        logger.info(f"Returning {len(result)} common timestamps for smooth blended animation")
         
         return jsonify(result)
         
     except Exception as e:
         logger.error(f"Error getting timestamps: {e}", exc_info=True)
         return jsonify({'error': 'Internal server error'}), 500
-        
+
 @app.route('/')
 def index():
     """Root endpoint."""
