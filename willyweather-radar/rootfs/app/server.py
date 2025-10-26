@@ -139,13 +139,19 @@ class WillyWeatherAPI:
         Download a radar overlay image.
         
         Args:
-            overlay_path: Base path for overlays
+            overlay_path: Base path for overlays (already includes protocol)
             overlay_name: Name of the overlay file
             
         Returns:
             Image bytes or None if failed
         """
-        url = f"https:{overlay_path}{overlay_name}"
+        # overlay_path already includes 'https:' or '//', don't add protocol
+        if overlay_path.startswith('//'):
+            url = f"https:{overlay_path}{overlay_name}"
+        elif overlay_path.startswith('https:'):
+            url = f"{overlay_path}{overlay_name}"
+        else:
+            url = overlay_path + overlay_name
         
         try:
             logger.debug(f"Downloading overlay: {url}")
