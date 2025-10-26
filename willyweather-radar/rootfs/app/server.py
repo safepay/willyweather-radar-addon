@@ -204,87 +204,144 @@ class RadarBlender:
         return min(inter_area / view_area, 1.0) if view_area > 0 else 0.0
     
     @staticmethod
-    def blend_images(images: List[Tuple[bytes, float]], smooth: bool = True) -> Optional[bytes]:
+    def blend_images(images: List[Tuple[bytes, float, Dict]], target_bounds: Dict, 
+                     target_size: Tuple[int, int] = (1024, 1024), smooth: bool = True) -> Optional[bytes]:
         """
         Blend multiple radar images with weights and optional smoothing.
-
+        
+        Each radar image is reprojected to the target bounds before blending.
+    
         Args:
-            images: List of (image_bytes, weight) tuples
+            images: List of (image_bytes, weight, bounds_dict) tuples
+            target_bounds: Dict with 'minLat', 'maxLat', 'minLng', 'maxLng' for output
+            target_size: Output image size (width, height)
             smooth: Apply smoothing filters to reduce pixelation (default True)
-
+    
         Returns:
             Blended image bytes or None
         """
         if not images:
             return None
-
+    
         try:
-            # Load all images
-            pil_images = []
-            weights = []
-
-            for img_bytes, weight in images:
-                img = Image.open(BytesIO(img_bytes)).convert('RGBA')
-                pil_images.append(img)
-                weights.append(weight)
-
-            # Normalize weights
-            total_weight = sum(weights)
-            if total_weight > 0:
-                weights = [w / total_weight for w in weights]
-            else:
-                weights = [1.0 / len(weights)] * len(weights)
-
-            # If only one image, apply smoothing and return
-            if len(pil_images) == 1:
-                result_img = pil_images[0]
-                if smooth:
-                    # Apply gentle smoothing for single images
-                    result_img = result_img.filter(ImageFilter.GaussianBlur(radius=0.5))
-                output = BytesIO()
-                result_img.save(output, format='PNG', optimize=True)
-                return output.getvalue()
-
-            # Ensure all images are the same size using high-quality resampling
-            base_size = pil_images[0].size
-            for i in range(1, len(pil_images)):
-                if pil_images[i].size != base_size:
-                    # Use BICUBIC for smoother results (better than LANCZOS for radar images)
-                    pil_images[i] = pil_images[i].resize(base_size, Image.BICUBIC)
-
-            # Convert to numpy arrays for blending
-            arrays = [np.array(img, dtype=np.float32) for img in pil_images]
-
-            # Weighted blending
-            blended = np.zeros_like(arrays[0])
-            for arr, weight in zip(arrays, weights):
-                blended += arr * weight
-
+            # Create a blank canvas at target bounds
+            canvas = Image.new('RGBA', target_size, (0, 0, 0, 0))
+            canvas_array = np.zeros((target_size[1], target_size[0], 4), dtype=np.float32)
+            total_weight_array = np.zeros((target_size[1], target_size[0]), dtype=np.float32)
+    
+            target_lat_range = target_bounds['maxLat'] - target_bounds['minLat']
+            target_lng_range = target_bounds['maxLng'] - target_bounds['minLng']
+    
+            for img_bytes, weight, img_bounds in images:
+                # Load the radar image
+                radar_img = Image.open(BytesIO(img_bytes)).convert('RGBA')
+                radar_array = np.array(radar_img, dtype=np.float32)
+                
+                # Calculate where this radar image maps onto the target canvas
+                # Radar image bounds
+                radar_lat_min = img_bounds['minLat']
+                radar_lat_max = img_bounds['maxLat']
+                radar_lng_min = img_bounds['minLng']
+                radar_lng_max = img_bounds['maxLng']
+                
+                # Calculate overlap region in target coordinates
+                overlap_lat_min = max(target_bounds['minLat'], radar_lat_min)
+                overlap_lat_max = min(target_bounds['maxLat'], radar_lat_max)
+                overlap_lng_min = max(target_bounds['minLng'], radar_lng_min)
+                overlap_lng_max = min(target_bounds['maxLng'], radar_lng_max)
+                
+                # Skip if no overlap
+                if overlap_lat_min >= overlap_lat_max or overlap_lng_min >= overlap_lng_max:
+                    logger.debug(f"Skipping image: no overlap with target bounds")
+                    continue
+                
+                # Calculate pixel coordinates in target canvas
+                canvas_x_start = int((overlap_lng_min - target_bounds['minLng']) / target_lng_range * target_size[0])
+                canvas_x_end = int((overlap_lng_max - target_bounds['minLng']) / target_lng_range * target_size[0])
+                canvas_y_start = int((target_bounds['maxLat'] - overlap_lat_max) / target_lat_range * target_size[1])
+                canvas_y_end = int((target_bounds['maxLat'] - overlap_lat_min) / target_lat_range * target_size[1])
+                
+                # Calculate source pixel coordinates in radar image
+                radar_lat_range = radar_lat_max - radar_lat_min
+                radar_lng_range = radar_lng_max - radar_lng_min
+                radar_height, radar_width = radar_array.shape[:2]
+                
+                src_x_start = int((overlap_lng_min - radar_lng_min) / radar_lng_range * radar_width)
+                src_x_end = int((overlap_lng_max - radar_lng_min) / radar_lng_range * radar_width)
+                src_y_start = int((radar_lat_max - overlap_lat_max) / radar_lat_range * radar_height)
+                src_y_end = int((radar_lat_max - overlap_lat_min) / radar_lat_range * radar_height)
+                
+                # Extract the relevant portion of the radar image
+                src_x_start = max(0, min(src_x_start, radar_width - 1))
+                src_x_end = max(0, min(src_x_end, radar_width))
+                src_y_start = max(0, min(src_y_start, radar_height - 1))
+                src_y_end = max(0, min(src_y_end, radar_height))
+                
+                if src_x_end <= src_x_start or src_y_end <= src_y_start:
+                    continue
+                
+                radar_crop = radar_array[src_y_start:src_y_end, src_x_start:src_x_end]
+                
+                # Resize to fit the canvas region using high-quality interpolation
+                canvas_width = canvas_x_end - canvas_x_start
+                canvas_height = canvas_y_end - canvas_y_start
+                
+                if canvas_width <= 0 or canvas_height <= 0:
+                    continue
+                
+                radar_crop_img = Image.fromarray(radar_crop.astype(np.uint8), mode='RGBA')
+                radar_crop_resized = radar_crop_img.resize((canvas_width, canvas_height), Image.BICUBIC)
+                radar_crop_array = np.array(radar_crop_resized, dtype=np.float32)
+                
+                # Ensure canvas coordinates are valid
+                canvas_y_start = max(0, min(canvas_y_start, target_size[1]))
+                canvas_y_end = max(0, min(canvas_y_end, target_size[1]))
+                canvas_x_start = max(0, min(canvas_x_start, target_size[0]))
+                canvas_x_end = max(0, min(canvas_x_end, target_size[0]))
+                
+                if canvas_y_end <= canvas_y_start or canvas_x_end <= canvas_x_start:
+                    continue
+                
+                # Adjust crop size if needed
+                actual_height = canvas_y_end - canvas_y_start
+                actual_width = canvas_x_end - canvas_x_start
+                radar_crop_array = radar_crop_array[:actual_height, :actual_width]
+                
+                # Create a weight mask (higher alpha = more weight)
+                alpha_channel = radar_crop_array[:, :, 3] / 255.0
+                pixel_weight = alpha_channel * weight
+                
+                # Add to canvas with weighted averaging
+                canvas_array[canvas_y_start:canvas_y_end, canvas_x_start:canvas_x_end] += \
+                    radar_crop_array * pixel_weight[:, :, np.newaxis]
+                total_weight_array[canvas_y_start:canvas_y_end, canvas_x_start:canvas_x_end] += pixel_weight
+    
+            # Normalize by total weight
+            mask = total_weight_array > 0
+            for i in range(4):
+                canvas_array[:, :, i][mask] /= total_weight_array[mask]
+    
             # Convert back to image
-            blended = np.clip(blended, 0, 255).astype(np.uint8)
-            result_img = Image.fromarray(blended, mode='RGBA')
-
+            canvas_array = np.clip(canvas_array, 0, 255).astype(np.uint8)
+            result_img = Image.fromarray(canvas_array, mode='RGBA')
+    
             # Apply smoothing filters to reduce pixelation
             if smooth:
-                # Apply gentle Gaussian blur to smooth transitions
                 result_img = result_img.filter(ImageFilter.GaussianBlur(radius=0.8))
-
-                # Apply slight sharpening to maintain detail after blur
                 result_img = result_img.filter(ImageFilter.UnsharpMask(
                     radius=1.0,
                     percent=50,
                     threshold=2
                 ))
-
+    
             # Save to bytes with optimization
             output = BytesIO()
             result_img.save(output, format='PNG', optimize=True)
             return output.getvalue()
-
+    
         except Exception as e:
             logger.error(f"Failed to blend images: {e}", exc_info=True)
             return None
-
 
 # Initialize API
 api = None
@@ -425,6 +482,7 @@ def get_radar():
         
         # For regional radar, blend multiple radars based on coverage
         weighted_images = []
+        all_bounds = []
         
         for provider in providers[:5]:  # Limit to 5 closest radars
             # Calculate coverage
@@ -450,16 +508,26 @@ def get_radar():
             image_data = api.download_overlay(provider['overlayPath'], overlay['name'])
             
             if image_data:
-                weighted_images.append((image_data, coverage))
+                # Pass image data, weight, AND bounds
+                weighted_images.append((image_data, coverage, provider['bounds']))
+                all_bounds.append(provider['bounds'])
                 logger.info(f"Added radar {provider['name']} with coverage {coverage:.2%}")
         
         if not weighted_images:
             logger.warning("No radar images available after filtering")
             return jsonify({'error': 'No radar images available'}), 404
         
-        # Blend images
-        logger.info(f"Blending {len(weighted_images)} radar images")
-        blended_data = RadarBlender.blend_images(weighted_images)
+        # Calculate composite bounds (union of all radar bounds)
+        composite_bounds = {
+            'minLat': min(b['minLat'] for b in all_bounds),
+            'minLng': min(b['minLng'] for b in all_bounds),
+            'maxLat': max(b['maxLat'] for b in all_bounds),
+            'maxLng': max(b['maxLng'] for b in all_bounds)
+        }
+        
+        # Blend images with proper geographic reprojection
+        logger.info(f"Blending {len(weighted_images)} radar images with bounds {composite_bounds}")
+        blended_data = RadarBlender.blend_images(weighted_images, composite_bounds)
         
         if not blended_data:
             return jsonify({'error': 'Failed to blend images'}), 500
