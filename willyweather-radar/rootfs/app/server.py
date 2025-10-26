@@ -827,6 +827,41 @@ def test_timezone_check():
     
     return jsonify(result)
 
+@app.route('/api/test/timestamp-comparison')
+def test_timestamp_comparison():
+    """Compare actual timestamp availability across radars."""
+    
+    # Get multiple radars for a location
+    providers = api.get_map_providers(-37.1, 144.1, 'regional-radar', offset=-120, limit=120)
+    
+    result = {
+        'note': 'Checking which timestamps each radar actually has',
+        'radars': []
+    }
+    
+    for p in providers[:5]:
+        overlays = p.get('overlays', [])
+        timestamps = [o['dateTime'] for o in overlays]
+        
+        result['radars'].append({
+            'name': p['name'],
+            'interval': p.get('interval'),
+            'count': len(timestamps),
+            'all_timestamps': timestamps
+        })
+    
+    # Find common timestamps
+    if len(result['radars']) > 1:
+        all_sets = [set(r['all_timestamps']) for r in result['radars']]
+        common = all_sets[0]
+        for s in all_sets[1:]:
+            common = common.intersection(s)
+        
+        result['common_timestamps'] = sorted(list(common))
+        result['common_count'] = len(common)
+    
+    return jsonify(result)
+    
 def main():
     """Main entry point."""
     global api
