@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 from io import BytesIO
 from math import radians, cos, sin, asin, sqrt
 from typing import Dict, List, Optional, Tuple
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 from flask import Flask, jsonify, request, send_file
@@ -45,7 +46,7 @@ os.makedirs(CACHE_DIR, exist_ok=True)
 config = {}
 cache = {}
 RADAR_STATIONS = None
-
+executor = ThreadPoolExecutor(max_workers=3)  # Limit concurrent requests
 
 def load_config():
     """Load configuration from options.json."""
@@ -313,13 +314,23 @@ class WillyWeatherAPI:
     """Interface to WillyWeather API."""
     
     BASE_URL = "https://api.willyweather.com.au/v2"
-    
+
     def __init__(self, api_key: str):
-        self.api_key = api_key
-        self.session = requests.Session()
-        self.session.headers.update({
-            'User-Agent': 'HomeAssistant-WillyWeatherRadar/1.0'
-        })
+            self.api_key = api_key
+            self.session = requests.Session()
+            self.session.headers.update({
+                'User-Agent': 'HomeAssistant-WillyWeatherRadar/1.0'
+            })
+            
+            # Connection pooling optimization
+            adapter = requests.adapters.HTTPAdapter(
+                pool_connections=10,
+                pool_maxsize=10,
+                max_retries=2,
+                pool_block=False
+            )
+            self.session.mount('http://', adapter)
+            self.session.mount('https://', adapter)
     
     def get_map_providers(self, lat: float, lng: float, map_type: str, 
                          offset: int = -60, limit: int = 60) -> List[Dict]:
@@ -712,14 +723,14 @@ def get_radar():
             logger.info(f"Successfully returned single radar ({len(image_data)} bytes)")
             return response
         
-        # === BLENDED REGIONAL RADAR ===
+# === BLENDED REGIONAL RADAR ===
         logger.info(f"Blending {len(radars)} radars")
         
         # Generate cache key
         radar_names = [r[0]['properties']['name'] for r in radars]
         cache_key = get_cache_key(radar_names, timestamp or 'latest')
         
-        # Check cache
+        # Check cache ONCE
         cached = get_cached_image(cache_key)
         if cached:
             composite_bounds, blended_image = cached
@@ -733,6 +744,102 @@ def get_radar():
             
             logger.info(f"Returned cached blend ({len(blended_image)} bytes)")
             return response
+        
+        logger.info("Cache miss - fetching radars concurrently")
+        
+        # Fetch radars CONCURRENTLY instead of sequentially
+        def fetch_radar_data(radar_tuple):
+            """Fetch a single radar's data."""
+            radar_station, coverage, distance = radar_tuple
+            radar_lat = radar_station['geometry']['coordinates'][1]
+            radar_lng = radar_station['geometry']['coordinates'][0]
+            radar_name = radar_station['properties']['name']
+            
+            try:
+                providers = api.get_map_providers(radar_lat, radar_lng, 'regional-radar', offset=-120, limit=120)
+                
+                if not providers:
+                    logger.warning(f"No provider for {radar_name}")
+                    return None
+                
+                provider = providers[0]
+                overlays = provider.get('overlays', [])
+                
+                if not overlays:
+                    logger.warning(f"No overlays for {radar_name}")
+                    return None
+                
+                overlay = None
+                if timestamp:
+                    overlay = next((o for o in overlays if o['dateTime'] == timestamp), None)
+                    if not overlay:
+                        logger.warning(f"{radar_name} missing timestamp {timestamp}")
+                        return None
+                else:
+                    overlay = overlays[-1]
+                
+                image_data = api.download_overlay(provider['overlayPath'], overlay['name'])
+                
+                if image_data:
+                    logger.info(f"✓ Fetched {radar_name}")
+                    return (image_data, coverage, provider['bounds'], radar_name)
+                else:
+                    logger.warning(f"Failed to download {radar_name}")
+                    return None
+                    
+            except Exception as e:
+                logger.error(f"Error fetching {radar_name}: {e}")
+                return None
+        
+        # Fetch all radars concurrently
+        weighted_images = []
+        all_bounds = []
+        
+        futures = {executor.submit(fetch_radar_data, radar): radar for radar in radars}
+        
+        for future in as_completed(futures):
+            result = future.result()
+            if result:
+                image_data, coverage, bounds, radar_name = result
+                weighted_images.append((image_data, coverage, bounds))
+                all_bounds.append(bounds)
+        
+        if not weighted_images:
+            logger.error("No radar images available after fetching")
+            return jsonify({'error': 'No radar images available'}), 404
+        
+        logger.info(f"Successfully fetched {len(weighted_images)}/{len(radars)} radars")
+        
+        composite_bounds = {
+            'minLat': min(b['minLat'] for b in all_bounds),
+            'maxLat': max(b['maxLat'] for b in all_bounds),
+            'minLng': min(b['minLng'] for b in all_bounds),
+            'maxLng': max(b['maxLng'] for b in all_bounds)
+        }
+        
+        blended_image = RadarBlender.blend_images(
+            weighted_images,
+            composite_bounds,
+            target_size=(512, 512),
+            smooth=False
+        )
+        
+        if not blended_image:
+            logger.error("Failed to blend radar images")
+            return jsonify({'error': 'Failed to blend'}), 500
+        
+        # Save to cache
+        save_to_cache(cache_key, (composite_bounds, blended_image))
+        
+        response = send_file(BytesIO(blended_image), mimetype='image/png', as_attachment=False)
+        response.headers['X-Radar-Bounds-South'] = str(composite_bounds['minLat'])
+        response.headers['X-Radar-Bounds-West'] = str(composite_bounds['minLng'])
+        response.headers['X-Radar-Bounds-North'] = str(composite_bounds['maxLat'])
+        response.headers['X-Radar-Bounds-East'] = str(composite_bounds['maxLng'])
+        response.headers['X-Cache'] = 'MISS'
+        
+        logger.info(f"Returned fresh blend ({len(blended_image)} bytes)")
+        return response
         
         logger.info("Cache miss - blending")
         
