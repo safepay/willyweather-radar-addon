@@ -843,28 +843,6 @@ def get_radar():
         
         logger.info("Cache miss - blending")
         
-        # ... rest of blending code continues ...        
-        # Generate cache key
-        radar_names = [r[0]['properties']['name'] for r in radars]
-        cache_key = get_cache_key(radar_names, timestamp or 'latest')
-        
-        # Check cache
-        cached = get_cached_image(cache_key)
-        if cached:
-            composite_bounds, blended_image = cached
-            
-            response = send_file(BytesIO(blended_image), mimetype='image/png', as_attachment=False)
-            response.headers['X-Radar-Bounds-South'] = str(composite_bounds['minLat'])
-            response.headers['X-Radar-Bounds-West'] = str(composite_bounds['minLng'])
-            response.headers['X-Radar-Bounds-North'] = str(composite_bounds['maxLat'])
-            response.headers['X-Radar-Bounds-East'] = str(composite_bounds['maxLng'])
-            response.headers['X-Cache'] = 'HIT'
-            
-            logger.info(f"Returned cached blend ({len(blended_image)} bytes)")
-            return response
-        
-        logger.info("Cache miss - blending")
-        
         # Fetch and blend (existing code)
         weighted_images = []
         all_bounds = []
