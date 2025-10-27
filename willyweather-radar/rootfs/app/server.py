@@ -151,14 +151,19 @@ def find_nearby_radars(lat, lng, max_distance_km=500):
 
 def select_radars_for_blending(lat, lng, zoom):
     """
-    Select radar(s) for display based on proximity.
+    Select radar(s) for display based on zoom and proximity.
     
     Strategy:
-    - Always prefer regional radars if any are within 260km
-    - Only use national if NO regional radars available
-    - Blend 2-3 best radars based on coverage
+    - Zoom ≤6: Always use national (very wide view - whole country)
+    - Zoom 7+: Use regional radars if available within 260km
+    - Only fall back to national if no regional radars available
     """
     zoom_radius_km = 5000 / (2 ** (zoom - 5))
+    
+    # Very wide zoom: use national radar
+    if zoom <= 6:
+        logger.info(f"Using national: zoom {zoom} too wide (radius {zoom_radius_km:.0f}km)")
+        return False, [], 'national'
     
     # Find nearby radars within 260km
     nearby = find_nearby_radars(lat, lng, max_distance_km=260)
@@ -186,7 +191,7 @@ def select_radars_for_blending(lat, lng, zoom):
         
         coverage = RadarBlender.calculate_coverage(bounds, lat, lng, zoom_radius_km)
         
-        # LOWER threshold: 5% instead of 10% to catch more radars at wide zoom
+        # Lower threshold: 5% instead of 10%
         if coverage >= 0.05:
             radars_with_coverage.append((station, coverage, distance))
             logger.info(f"  ✓ {radar_name} qualifies: coverage={coverage:.1%}, distance={distance:.1f}km")
@@ -196,7 +201,7 @@ def select_radars_for_blending(lat, lng, zoom):
     logger.info(f"Total radars qualifying: {len(radars_with_coverage)}")
     
     # If we have nearby radars but none qualify by coverage, USE THEM ANYWAY
-    # This prevents losing rain data when zooming out
+    # This prevents losing rain data when zooming between national and regional
     if not radars_with_coverage and len(nearby) > 0:
         logger.info("No radars meet coverage threshold, but radars are nearby - using them anyway")
         
@@ -242,7 +247,7 @@ def select_radars_for_blending(lat, lng, zoom):
                f"({', '.join(radar_names)}) at zoom {zoom}")
     
     return True, blend_radars, 'blend'
-
+    
 def get_cache_key(radar_names, timestamp):
     """Generate cache key for blended radar."""
     radar_str = ','.join(sorted(radar_names))
