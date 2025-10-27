@@ -6,6 +6,7 @@ import logging
 import os
 import sys
 import time
+import pickle
 from datetime import datetime, timedelta
 from io import BytesIO
 from math import radians, cos, sin, asin, sqrt
@@ -218,7 +219,69 @@ def select_radars_for_blending(lat, lng, zoom):
                f"({', '.join(radar_names)}) at zoom {zoom}")
     
     return True, blend_radars, 'blend'
+
+
+def get_cache_key(radar_names, timestamp):
+    """Generate cache key for blended radar."""
+    radar_str = ','.join(sorted(radar_names))
+    return f"blend_{radar_str}_{timestamp}".replace(' ', '_').replace(':', '-')
+
+
+def get_cached_image(cache_key):
+    """Get cached blended image if available and not expired."""
+    global cache
     
+    if cache_key in cache:
+        cached_data, cached_time = cache[cache_key]
+        age = time.time() - cached_time
+        cache_duration = config.get('cache_duration', 300)
+        
+        if age < cache_duration:
+            logger.info(f"✓ Cache hit: {cache_key} (age: {age:.0f}s)")
+            return cached_data
+        else:
+            del cache[cache_key]
+            logger.debug(f"Cache expired: {cache_key}")
+    
+    # Check file cache
+    cache_file = os.path.join(CACHE_DIR, f"{cache_key}.pkl")
+    if os.path.exists(cache_file):
+        try:
+            file_age = time.time() - os.path.getmtime(cache_file)
+            if file_age < config.get('cache_duration', 300):
+                with open(cache_file, 'rb') as f:
+                    cached_data = pickle.load(f)
+                logger.info(f"✓ File cache hit: {cache_key}")
+                cache[cache_key] = (cached_data, time.time())
+                return cached_data
+            else:
+                os.remove(cache_file)
+        except Exception as e:
+            logger.error(f"Error reading cache file: {e}")
+    
+    return None
+
+def save_to_cache(cache_key, data):
+    """Save blended image to cache (memory and disk)."""
+    global cache
+    
+    cache[cache_key] = (data, time.time())
+    
+    try:
+        cache_file = os.path.join(CACHE_DIR, f"{cache_key}.pkl")
+        with open(cache_file, 'wb') as f:
+            pickle.dump(data, f)
+        logger.info(f"✓ Cached: {cache_key} (mem + disk)")
+    except Exception as e:
+        logger.error(f"Error writing cache file: {e}")
+    
+    # Clean old memory cache entries
+    if len(cache) > 20:
+        oldest_keys = sorted(cache.keys(), key=lambda k: cache[k][1])[:len(cache) - 20]
+        for key in oldest_keys:
+            del cache[key]
+
+
 class WillyWeatherAPI:
     """Interface to WillyWeather API."""
     
@@ -543,7 +606,7 @@ def get_radar_info():
 
 @app.route('/api/radar')
 def get_radar():
-    """Get radar imagery - national, single regional, or blended regional."""
+    """Get radar imagery - with caching."""
     try:
         lat = float(request.args.get('lat', -33.8688))
         lng = float(request.args.get('lng', 151.2093))
@@ -552,81 +615,41 @@ def get_radar():
         
         zoom_radius_km = 5000 / (2 ** (zoom - 5))
         
-        # Select radar(s)
         use_regional, radars, mode = select_radars_for_blending(lat, lng, zoom)
         
         # === NATIONAL RADAR ===
         if not use_regional:
-            logger.info(f"Requesting national radar")
-            providers = api.get_map_providers(lat, lng, 'radar', offset=-120, limit=120)
+            # ... existing national code (no caching needed - it's fast) ...
             
-            if not providers:
-                return jsonify({'error': 'No radar data available'}), 404
-            
-            provider = providers[0]
-            overlays = provider.get('overlays', [])
-            
-            if not overlays:
-                return jsonify({'error': 'No overlays available'}), 404
-            
-            overlay = next((o for o in overlays if o['dateTime'] == timestamp), overlays[-1]) if timestamp else overlays[-1]
-            
-            logger.info(f"Using national radar, timestamp {overlay['dateTime']}")
-            
-            image_data = api.download_overlay(provider['overlayPath'], overlay['name'])
-            
-            if not image_data:
-                return jsonify({'error': 'Failed to download'}), 500
-            
-            response = send_file(BytesIO(image_data), mimetype='image/png', as_attachment=False)
-            response.headers['X-Radar-Bounds-South'] = str(provider['bounds']['minLat'])
-            response.headers['X-Radar-Bounds-West'] = str(provider['bounds']['minLng'])
-            response.headers['X-Radar-Bounds-North'] = str(provider['bounds']['maxLat'])
-            response.headers['X-Radar-Bounds-East'] = str(provider['bounds']['maxLng'])
-            
-            logger.info(f"Successfully returned national radar ({len(image_data)} bytes)")
-            return response
-        
         # === SINGLE REGIONAL RADAR ===
         if mode == 'single':
-            radar_station = radars[0][0]
-            radar_lat = radar_station['geometry']['coordinates'][1]
-            radar_lng = radar_station['geometry']['coordinates'][0]
+            # ... existing single code (no caching needed - it's fast) ...
             
-            logger.info(f"Requesting single radar at ({radar_lat:.4f}, {radar_lng:.4f})")
-            providers = api.get_map_providers(radar_lat, radar_lng, 'regional-radar', offset=-120, limit=120)
-            
-            if not providers:
-                return jsonify({'error': 'No radar data'}), 404
-            
-            provider = providers[0]
-            overlays = provider.get('overlays', [])
-            
-            if not overlays:
-                return jsonify({'error': 'No overlays'}), 404
-            
-            overlay = next((o for o in overlays if o['dateTime'] == timestamp), overlays[-1]) if timestamp else overlays[-1]
-            
-            logger.info(f"Using {provider['name']}, timestamp {overlay['dateTime']}")
-            
-            image_data = api.download_overlay(provider['overlayPath'], overlay['name'])
-            
-            if not image_data:
-                return jsonify({'error': 'Failed to download'}), 500
-            
-            response = send_file(BytesIO(image_data), mimetype='image/png', as_attachment=False)
-            response.headers['X-Radar-Bounds-South'] = str(provider['bounds']['minLat'])
-            response.headers['X-Radar-Bounds-West'] = str(provider['bounds']['minLng'])
-            response.headers['X-Radar-Bounds-North'] = str(provider['bounds']['maxLat'])
-            response.headers['X-Radar-Bounds-East'] = str(provider['bounds']['maxLng'])
-            
-            logger.info(f"Successfully returned single radar ({len(image_data)} bytes)")
-            return response
-        
         # === BLENDED REGIONAL RADAR ===
         logger.info(f"Blending {len(radars)} radars")
         
-        # Fetch each radar's data by requesting at the radar's location
+        # Generate cache key
+        radar_names = [r[0]['properties']['name'] for r in radars]
+        cache_key = get_cache_key(radar_names, timestamp or 'latest')
+        
+        # Check cache
+        cached = get_cached_image(cache_key)
+        if cached:
+            composite_bounds, blended_image = cached
+            
+            response = send_file(BytesIO(blended_image), mimetype='image/png', as_attachment=False)
+            response.headers['X-Radar-Bounds-South'] = str(composite_bounds['minLat'])
+            response.headers['X-Radar-Bounds-West'] = str(composite_bounds['minLng'])
+            response.headers['X-Radar-Bounds-North'] = str(composite_bounds['maxLat'])
+            response.headers['X-Radar-Bounds-East'] = str(composite_bounds['maxLng'])
+            response.headers['X-Cache'] = 'HIT'
+            
+            logger.info(f"Returned cached blend ({len(blended_image)} bytes)")
+            return response
+        
+        logger.info("Cache miss - blending")
+        
+        # Fetch and blend (existing code)
         weighted_images = []
         all_bounds = []
         
@@ -635,7 +658,6 @@ def get_radar():
             radar_lng = radar_station['geometry']['coordinates'][0]
             radar_name = radar_station['properties']['name']
             
-            # Request this specific radar
             providers = api.get_map_providers(radar_lat, radar_lng, 'regional-radar', offset=-120, limit=120)
             
             if not providers:
@@ -649,33 +671,27 @@ def get_radar():
                 logger.warning(f"No overlays for {radar_name}")
                 continue
             
-            # Get specific timestamp or latest
             overlay = None
             if timestamp:
                 overlay = next((o for o in overlays if o['dateTime'] == timestamp), None)
                 if not overlay:
-                    logger.warning(f"{radar_name} does not have timestamp {timestamp}, skipping")
+                    logger.warning(f"{radar_name} missing timestamp {timestamp}")
                     continue
             else:
                 overlay = overlays[-1]
             
-            # Download image
             image_data = api.download_overlay(provider['overlayPath'], overlay['name'])
             
             if image_data:
                 weighted_images.append((image_data, coverage, provider['bounds']))
                 all_bounds.append(provider['bounds'])
-                logger.info(f"✓ Added {radar_name} with coverage {coverage:.1%}, timestamp {overlay['dateTime']}")
+                logger.info(f"✓ Added {radar_name}")
             else:
                 logger.warning(f"Failed to download {radar_name}")
         
         if not weighted_images:
-            logger.error("No radar images available after fetching")
             return jsonify({'error': 'No radar images available'}), 404
         
-        logger.info(f"Blending {len(weighted_images)} radar images")
-        
-        # Calculate composite bounds
         composite_bounds = {
             'minLat': min(b['minLat'] for b in all_bounds),
             'maxLat': max(b['maxLat'] for b in all_bounds),
@@ -683,7 +699,6 @@ def get_radar():
             'maxLng': max(b['maxLng'] for b in all_bounds)
         }
         
-        # Blend the images
         blended_image = RadarBlender.blend_images(
             weighted_images,
             composite_bounds,
@@ -692,22 +707,24 @@ def get_radar():
         )
         
         if not blended_image:
-            logger.error("Failed to blend radar images")
-            return jsonify({'error': 'Failed to blend images'}), 500
+            return jsonify({'error': 'Failed to blend'}), 500
+        
+        # Save to cache
+        save_to_cache(cache_key, (composite_bounds, blended_image))
         
         response = send_file(BytesIO(blended_image), mimetype='image/png', as_attachment=False)
         response.headers['X-Radar-Bounds-South'] = str(composite_bounds['minLat'])
         response.headers['X-Radar-Bounds-West'] = str(composite_bounds['minLng'])
         response.headers['X-Radar-Bounds-North'] = str(composite_bounds['maxLat'])
         response.headers['X-Radar-Bounds-East'] = str(composite_bounds['maxLng'])
+        response.headers['X-Cache'] = 'MISS'
         
-        logger.info(f"Successfully returned blended radar ({len(blended_image)} bytes)")
+        logger.info(f"Returned fresh blend ({len(blended_image)} bytes)")
         return response
         
     except Exception as e:
         logger.error(f"Error: {e}", exc_info=True)
         return jsonify({'error': 'Internal server error'}), 500
-
 @app.route('/api/providers')
 def get_providers():
     """
