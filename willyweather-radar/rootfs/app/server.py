@@ -161,7 +161,7 @@ def select_radars_for_blending(lat, lng, zoom):
     zoom_radius_km = 5000 / (2 ** (zoom - 5))
     
     # Very wide zoom: use national radar
-    if zoom <= 6:
+    if zoom <= 7:
         logger.info(f"Using national: zoom {zoom} too wide (radius {zoom_radius_km:.0f}km)")
         return False, [], 'national'
     
